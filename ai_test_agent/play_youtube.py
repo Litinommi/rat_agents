@@ -129,12 +129,12 @@ def _play_on_device(device_id: str, url: str, duration_seconds: int, options: ar
 def _run_ai_fallback(failed: dict[str, str], args: argparse.Namespace, duration_seconds: int) -> dict[str, str]:
     """Hand each failed device to the AI agent, in parallel. Returns the
     agent's final status per device (PASS / FAIL / NEEDS_HUMAN / ...)."""
-    # Imported here so plain runs never need the anthropic package or an API key.
+    # Imported here so plain runs never need the OpenAI SDK or an API key.
     import agent
-    from config import ANTHROPIC_API_KEY
+    from config import nim_configuration_error
 
-    if not ANTHROPIC_API_KEY:
-        print("--ai-fallback: ANTHROPIC_API_KEY is not set in .env - skipping the AI agent.", file=sys.stderr)
+    if error := nim_configuration_error():
+        print(f"--ai-fallback: {error} Skipping the AI agent.", file=sys.stderr)
         return {}
 
     agent_results: dict[str, str] = {}
@@ -175,7 +175,7 @@ def main() -> int:
     parser.add_argument("--fullscreen", action=argparse.BooleanOptionalAction, default=True, help="Enter full screen (default: on)")
     parser.add_argument("--stats-for-nerds", action=argparse.BooleanOptionalAction, default=True, help="Enable the Stats for nerds overlay (default: on)")
     parser.add_argument("--ai-fallback", action="store_true",
-                        help="Call the AI agent only for devices where a step failed (needs ANTHROPIC_API_KEY)")
+                        help="Call the AI agent only for devices where a step failed (needs NVIDIA_NIM_API_KEY and NVIDIA_NIM_MODEL)")
     args = parser.parse_args()
 
     if urlparse(args.video_url).hostname not in _YOUTUBE_HOSTS:
@@ -234,11 +234,11 @@ def _ai_fallback_grouped(failed: dict[str, str], args: argparse.Namespace, durat
     individually. Disconnected phones never reach the AI - a person has to
     fix those.
     """
-    from config import ANTHROPIC_API_KEY
+    from config import nim_configuration_error
 
     statuses: dict[str, str] = {}
-    if not ANTHROPIC_API_KEY:
-        print("\n--ai-fallback: ANTHROPIC_API_KEY is not set in .env - skipping the AI agent.", file=sys.stderr, flush=True)
+    if error := nim_configuration_error():
+        print(f"\n--ai-fallback: {error} Skipping the AI agent.", file=sys.stderr, flush=True)
         return statuses
 
     disconnected = [d for d in failed if not adb_tools.device_exists(d)]

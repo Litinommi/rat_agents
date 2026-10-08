@@ -1,7 +1,7 @@
 """Run state and the tool registry the agent loop dispatches into.
 
 This is the safety boundary of the whole PoC: TOOL_SCHEMAS (in
-llm_client.py) is the only thing Claude ever sees, and build_tool_registry
+llm_client.py) is the only thing the model ever sees, and build_tool_registry
 here is the only thing that turns a tool name + LLM-supplied arguments
 into an actual function call. device_id and the simulated-backend handle
 are bound via functools.partial and never appear in a schema, so the

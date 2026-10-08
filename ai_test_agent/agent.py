@@ -16,8 +16,9 @@ import threading
 from urllib.parse import urlparse
 
 import report_generator
-from config import ANTHROPIC_API_KEY
+from config import nim_configuration_error
 from llm_client import run_agent_loop
+from nim_client import NIMError
 from test_runner import TestState, build_tool_registry
 from tools import adb_tools, youtube_tools, test_tools
 from tools.simulate import SimulatedState
@@ -198,8 +199,14 @@ def run_device(device_id: str, args: argparse.Namespace, duration_seconds: int, 
                 state=state,
                 root_cause=reason,
             )
+    except NIMError as exc:
+        console._print(f"[AGENT] {exc}")
+        test_tools.generate_report(
+            device_id, status="NEEDS_HUMAN", summary=str(exc), state=state,
+            root_cause=str(exc),
+        )
     except Exception as exc:  # noqa: BLE001 - one device's crash must not take down the others
-        console._print(f"[AGENT] Run crashed: {exc}")
+        console._print(f"[AGENT] Run crashed ({type(exc).__name__}).")
     finally:
         if not args.simulate:
             youtube_tools.quit_session(device_id)
@@ -255,8 +262,8 @@ def main() -> int:
     if duration_seconds < 5:
         print("--duration must be at least 5 seconds (0.1 minutes)", file=sys.stderr)
         return 2
-    if not ANTHROPIC_API_KEY:
-        print("ANTHROPIC_API_KEY is not set. Add it to .env (see .env.example). "
+    if error := nim_configuration_error():
+        print(error + " "
               "Without a key, use play_youtube.py (no AI, uses learned recipes).", file=sys.stderr)
         return 2
 

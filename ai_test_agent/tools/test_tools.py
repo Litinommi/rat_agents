@@ -81,7 +81,8 @@ def generate_report(
         root_cause=root_cause,
         recovery_action=recovery_action,
         tool_call_count=state.tool_call_count,
-        tool_history=state.tool_history,
+        # Snapshot history before the registry records this terminal tool result.
+        tool_history=list(state.tool_history),
     )
     saved_path = report_generator.save_report(report)
     report["saved_to"] = saved_path

@@ -1,7 +1,7 @@
-"""Claude tool-use wiring: the tool schemas Claude is allowed to call, the
+"""NVIDIA NIM tool-use wiring: the tool schemas NVIDIA NIM is allowed to call, the
 system prompt that frames the loop, and the manual agentic loop itself.
 
-This is a manual `while` loop (not the SDK's beta tool_runner) so agent.py
+This is a manual `while` loop so agent.py
 gets full control over per-call console narration, the hard MAX_TOOL_CALLS
 / MAX_RETRIES safety valves, and injecting device_id / video URL outside the
 schema - none of which the model ever sees or controls.
@@ -9,9 +9,8 @@ schema - none of which the model ever sees or controls.
 
 import json
 
-import anthropic
-
-from config import ANTHROPIC_API_KEY, CLAUDE_MAX_TOKENS, CLAUDE_MODEL, MAX_LLM_TURNS, MAX_RETRIES, MAX_TOOL_CALLS
+from config import NVIDIA_NIM_VISION, MAX_LLM_TURNS, MAX_RETRIES, MAX_TOOL_CALLS
+from nim_client import create_client, chat_completion
 from test_runner import ToolBudgetExceeded
 from tools.ui_tools import RECIPE_TASKS
 
@@ -22,23 +21,23 @@ TOOL_SCHEMAS = [
     {
         "name": "check_device",
         "description": "Check whether the target Android device is connected and responsive via ADB. Always call this first.",
-        "input_schema": _NO_INPUT,
+        "parameters": _NO_INPUT,
     },
     {
         "name": "get_device_info",
         "description": "Get manufacturer, model, Android version, YouTube app version, system locale and screen size. "
         "These decide which UI YouTube shows, so call this early - it tells you whether to expect a non-English UI.",
-        "input_schema": _NO_INPUT,
+        "parameters": _NO_INPUT,
     },
     {
         "name": "get_wifi_status",
         "description": "Check whether Wi-Fi is enabled and connected on the device via ADB.",
-        "input_schema": _NO_INPUT,
+        "parameters": _NO_INPUT,
     },
     {
         "name": "toggle_wifi",
         "description": "Enable or disable Wi-Fi on the device via ADB (`svc wifi`). Use this as a recovery action when you diagnose a connectivity problem.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {"enabled": {"type": "boolean", "description": "True to enable Wi-Fi, false to disable it."}},
             "required": ["enabled"],
@@ -48,23 +47,23 @@ TOOL_SCHEMAS = [
     {
         "name": "launch_youtube",
         "description": "Connect to the phone and (re)launch the YouTube app fresh on its home screen.",
-        "input_schema": _NO_INPUT,
+        "parameters": _NO_INPUT,
     },
     {
         "name": "open_video_url",
         "description": "Open the test's video URL directly in the YouTube app (deep link). The URL is fixed by the test configuration.",
-        "input_schema": _NO_INPUT,
+        "parameters": _NO_INPUT,
     },
     {
         "name": "wait_for_ads",
         "description": "Tap 'Skip' on ads when offered, otherwise wait until pre-roll ads finish. Call after open_video_url and before player actions.",
-        "input_schema": _NO_INPUT,
+        "parameters": _NO_INPUT,
     },
     {
         "name": "enable_stats_for_nerds",
         "description": "Built-in step to turn on the 'Stats for nerds' overlay. Tries a learned recipe for this device first, "
         "then English-UI locators. If it fails, do the step yourself with the UI tools (see system prompt).",
-        "input_schema": _NO_INPUT,
+        "parameters": _NO_INPUT,
     },
     {
         "name": "enable_stats_in_app_settings",
@@ -74,24 +73,24 @@ TOOL_SCHEMAS = [
         "tap_element, typically You -> Settings -> General -> 'Enable stats for nerds'), verify the switch is on, "
         "and save_recipe('enable_stats_in_settings', steps) using a switch_on step for the toggle. Afterwards call "
         "open_video_url and wait_for_ads, then enable_stats_for_nerds again.",
-        "input_schema": _NO_INPUT,
+        "parameters": _NO_INPUT,
     },
     {
         "name": "enter_fullscreen",
         "description": "Built-in step to put the player in full screen. Tries a learned recipe for this device first, then the "
         "standard fullscreen button. If it fails, do the step yourself with the UI tools.",
-        "input_schema": _NO_INPUT,
+        "parameters": _NO_INPUT,
     },
     {
         "name": "stop_video",
         "description": "Press Back once (exits full screen, or leaves the player).",
-        "input_schema": _NO_INPUT,
+        "parameters": _NO_INPUT,
     },
     {
         "name": "get_playback_status",
         "description": "Monitor playback for the given number of seconds (up to the full test duration in one call). Returns early "
         "if an error is detected. Reports playing, error_detected, error_message and media_state.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "duration_seconds": {"type": "integer", "description": "How many seconds to monitor playback for."}
@@ -104,13 +103,13 @@ TOOL_SCHEMAS = [
         "name": "get_player_state",
         "description": "Language-independent verification: fullscreen (player geometry), stats_for_nerds_visible, ad_showing, "
         "orientation, media_state. Use it to verify any step - especially ones you performed manually.",
-        "input_schema": _NO_INPUT,
+        "parameters": _NO_INPUT,
     },
     {
         "name": "get_screen",
         "description": "See the current screen: a numbered list of UI elements (class, resource_id, text, desc, clickable, "
         "bounds) plus a screenshot. Labels may be in any language - use the screenshot and icons/positions to understand them.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "include_screenshot": {
@@ -124,14 +123,14 @@ TOOL_SCHEMAS = [
     {
         "name": "reveal_player_controls",
         "description": "Tap the video player once so its auto-hiding controls (settings, fullscreen, play/pause) appear for ~3s.",
-        "input_schema": _NO_INPUT,
+        "parameters": _NO_INPUT,
     },
     {
         "name": "tap_element",
         "description": "Tap element number `index` from the most recent get_screen. Player controls auto-hide within ~3s, so "
         "for a player button set reveal_player_controls_first=true (taps the player, re-finds the button, taps it). "
         "Each successful tap returns a ready-made recipe_step.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "index": {"type": "integer", "description": "Element number from the last get_screen."},
@@ -143,7 +142,7 @@ TOOL_SCHEMAS = [
     {
         "name": "press_key",
         "description": "Press a hardware/system key.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {"key": {"type": "string", "enum": ["back", "home", "enter", "space", "media_play_pause", "escape"]}},
             "required": ["key"],
@@ -152,7 +151,7 @@ TOOL_SCHEMAS = [
     {
         "name": "swipe",
         "description": "Swipe the screen to scroll; 'up' reveals content further down (e.g. more menu items).",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {"direction": {"type": "string", "enum": ["up", "down", "left", "right"]}},
             "required": ["direction"],
@@ -164,7 +163,7 @@ TOOL_SCHEMAS = [
         "tool replays them automatically on this device profile (same model, YouTube version, locale) in future runs. "
         "Copy the recipe_step objects returned by tap_element / press_key / reveal_player_controls, in order, "
         "leaving out detours that didn't contribute.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "task": {"type": "string", "enum": list(RECIPE_TASKS)},
@@ -203,7 +202,7 @@ TOOL_SCHEMAS = [
     {
         "name": "collect_logs",
         "description": "Capture recent device logs (logcat) relevant to YouTube/Wi-Fi and save them for analysis.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {"reason": {"type": "string", "description": "Why you are collecting logs right now."}},
             "required": [],
@@ -215,7 +214,7 @@ TOOL_SCHEMAS = [
             f"Re-run the core playback steps (stop, relaunch, open the URL, clear ads). Bounded to {MAX_RETRIES} retries "
             f"total - check retries_remaining in prior results before calling again. Redo fullscreen/stats afterwards."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "reason": {"type": "string", "description": "Your diagnosis of what went wrong and why a retry is expected to help."}
@@ -229,7 +228,7 @@ TOOL_SCHEMAS = [
             "Finish the test and produce the final report. This ALWAYS ends the run - call it exactly once, "
             "after you have a verified PASS/FAIL, or once you conclude the issue needs a human."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "status": {"type": "string", "enum": ["PASS", "FAIL", "NEEDS_HUMAN"]},
@@ -244,6 +243,9 @@ TOOL_SCHEMAS = [
         },
     },
 ]
+
+
+TOOL_SCHEMAS = [{"type": "function", "function": schema} for schema in TOOL_SCHEMAS]
 
 
 def build_system_prompt(*, device_id: str, duration_seconds: int, video_url: str, fullscreen: bool, stats_for_nerds: bool) -> str:
@@ -306,95 +308,72 @@ your reasoning live to a human watching the console."""
 
 
 def _tool_result_content(result: dict):
-    """Tool results are JSON text; a get_screen screenshot is attached as an
-    image block so the model can see non-English or icon-only UIs."""
-    image_b64 = result.pop("_image_jpeg_b64", None) if isinstance(result, dict) else None
-    text = json.dumps(result, default=str, ensure_ascii=False)
-    if not image_b64:
-        return text
-    return [
-        {"type": "text", "text": text},
-        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
-    ]
-
-
-def _model_specific_options(model: str) -> dict:
-    """Haiku 4.5 (the low-cost option) runs without thinking - it doesn't
-    support adaptive thinking - and without server-side fallbacks. Larger
-    models get adaptive thinking plus a fallback model if they decline."""
-    if model.startswith("claude-haiku"):
-        return {}
-    return {
-        "thinking": {"type": "adaptive"},
-        "betas": ["server-side-fallback-2026-07-01"],
-        "fallbacks": "default",
-    }
+    """Keep tool results text-only; images belong in a subsequent user message."""
+    payload = dict(result)
+    image_b64 = payload.pop("_image_jpeg_b64", None)
+    if image_b64 and not NVIDIA_NIM_VISION:
+        payload["screenshot_note"] = (
+            "Screenshot omitted: NVIDIA_NIM_VISION is disabled. Use UI elements and device state."
+        )
+    return json.dumps(payload, default=str, ensure_ascii=False), image_b64
 
 
 def run_agent_loop(*, goal: str, state, dispatch, on_assistant_text, on_tool_call, on_tool_result) -> str:
-    """Drives the manual agentic loop. Returns 'finished', 'budget_exceeded',
-    'refused' or 'turns_exhausted' - agent.py decides what to do if it's not 'finished'.
-    """
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    system_prompt = build_system_prompt(
-        device_id=state.device_id,
-        duration_seconds=state.duration_seconds,
-        video_url=state.video_url,
-        fullscreen=state.fullscreen,
-        stats_for_nerds=state.stats_for_nerds,
-    )
-    messages = [{"role": "user", "content": f"Test goal: {goal}"}]
+    """Keep device dispatch and budgets local; send OpenAI-compatible history."""
+    with create_client() as client:
+        return _run_agent_loop(client, goal, state, dispatch, on_assistant_text, on_tool_call, on_tool_result)
 
+
+def _run_agent_loop(client, goal, state, dispatch, on_assistant_text, on_tool_call, on_tool_result):
+    messages = [
+        {"role": "system", "content": build_system_prompt(
+            device_id=state.device_id, duration_seconds=state.duration_seconds,
+            video_url=state.video_url, fullscreen=state.fullscreen, stats_for_nerds=state.stats_for_nerds,
+        )},
+        {"role": "user", "content": f"Test goal: {goal}"},
+    ]
+    allowed_tools = {schema["function"]["name"] for schema in TOOL_SCHEMAS}
     for _ in range(MAX_LLM_TURNS):
-        response = client.beta.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=CLAUDE_MAX_TOKENS,
-            system=system_prompt,
-            tools=TOOL_SCHEMAS,
-            messages=messages,
-            # Caches tools + system + history prefix across turns of the loop.
-            cache_control={"type": "ephemeral"},
-            **_model_specific_options(CLAUDE_MODEL),
-        )
-
-        text = "\n".join(block.text for block in response.content if block.type == "text").strip()
-        if text:
-            on_assistant_text(text)
-
-        if response.stop_reason == "refusal":
+        message, refused = chat_completion(client, messages, tools=TOOL_SCHEMAS, on_text=on_assistant_text)
+        if refused:
             return "refused"
+        messages.append(message)
+        calls = message.get("tool_calls", [])
+        if not calls:
+            break
 
-        # Append the full content (thinking + tool_use blocks) - required for the next turn.
-        messages.append({"role": "assistant", "content": response.content})
-
-        tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
-        if not tool_use_blocks:
-            break  # model stopped without calling generate_report; treat as done
-
-        tool_results = []
-        budget_exceeded = False
-        for block in tool_use_blocks:
-            on_tool_call(block.name, block.input)
+        budget_exceeded, images = False, []
+        for call in calls:
+            name = call["function"]["name"]
             try:
-                result = dispatch(block.name, block.input)
-                is_error = False
+                arguments = json.loads(call["function"]["arguments"])
+                if not isinstance(arguments, dict):
+                    raise ValueError("Arguments must be a JSON object")
+                if name not in allowed_tools:
+                    raise ValueError("Unknown tool")
+                if state.finished or budget_exceeded:
+                    result = {"error": "Run has ended; this tool was not executed."}
+                else:
+                    on_tool_call(name, arguments)
+                    result = dispatch(name, arguments)
             except ToolBudgetExceeded as exc:
                 result = {"error": str(exc)}
-                is_error = True
                 budget_exceeded = True
-            except TypeError as exc:  # model sent arguments the tool doesn't accept
-                result = {"error": f"Invalid arguments for {block.name}: {exc}"}
-                is_error = True
-
-            content = _tool_result_content(result)
-            on_tool_result(block.name, result)
-            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": content, "is_error": is_error})
-
-        messages.append({"role": "user", "content": tool_results})
-
+            except (ValueError, TypeError):
+                result = {"error": "Invalid tool name or arguments. Use a defined tool and valid JSON object arguments."}
+            content, image_b64 = _tool_result_content(result)
+            on_tool_result(name, {key: value for key, value in result.items() if key != "_image_jpeg_b64"})
+            messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
+            if image_b64 and NVIDIA_NIM_VISION:
+                images.extend([
+                    {"type": "text", "text": f"Screenshot from {name} (tool call {call['id']}):"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                ])
+        # All tool responses must precede supplemental screenshots.
+        if images:
+            messages.append({"role": "user", "content": images})
         if budget_exceeded:
             return "budget_exceeded"
         if state.finished:
             return "finished"
-
     return "finished" if state.finished else "turns_exhausted"
