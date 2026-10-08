@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "agentic_youtube: AI YouTube Playback Test Agent",
+    "locale": "en",
+    "output": ".archify/architecture-agentic-youtube-20261008-134431/agentic-youtube.html",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "aiLoop", "label": "AI loop", "focus": ["tester", "agent", "llm", "claude", "registry"], "note": "Claude picks one typed tool per turn; Python runs it on the bound phone and returns the result." },
+      { "id": "selfHeal", "label": "Self-healing", "focus": ["registry", "yt", "ui", "recipes"], "note": "A built-in step fails, the AI reads the screen, taps, verifies, then saves a recipe for that phone profile." },
+      { "id": "scripted", "label": "Scripted path", "focus": ["tester", "play", "yt", "agent"], "note": "play_youtube.py runs free first; only phones that fail are handed to the AI with --ai-fallback." },
+      { "id": "deviceIo", "label": "Device I/O", "focus": ["yt", "ui", "adb", "flow", "bridge", "phone"], "note": "Every phone action goes through ADB or uiautomator2 over USB debugging." },
+      { "id": "outputs", "label": "Outputs", "focus": ["flow", "reports", "ui", "recipes"], "note": "Reports and logcat land in reports/ and logs/; learned steps land in learned_recipes.json." }
+    ]
+  },
+  "components": [
+    { "id": "tester", "type": "external", "icon": "person", "label": "Tester", "sublabel": "runs a CLI on the PC", "pos": [40, 463], "size": [130, 64] },
+    { "id": "agent", "type": "backend", "label": "agent.py", "sublabel": "AI CLI · 1 thread/phone", "pos": [300, 463], "size": [160, 64] },
+    { "id": "play", "type": "backend", "label": "play_youtube.py", "sublabel": "scripted · no tokens", "pos": [300, 900], "size": [160, 64] },
+    { "id": "llm", "type": "backend", "label": "llm_client.py", "sublabel": "agent loop · 22 tools", "pos": [600, 463], "size": [170, 64] },
+    { "id": "claude", "type": "cloud", "label": "Claude API", "sublabel": "CLAUDE_MODEL · tool use", "pos": [600, 280], "size": [170, 64] },
+    { "id": "registry", "type": "security", "label": "test_runner.py", "sublabel": "tool registry + limits", "tag": "device_id bound", "pos": [900, 170], "size": [170, 650] },
+    { "id": "sim", "type": "backend", "label": "simulate.py", "sublabel": "fake phone (--simulate)", "pos": [900, 40], "size": [170, 64] },
+    { "id": "reports", "type": "database", "label": "reports/ + logs/", "sublabel": "JSON report · logcat", "pos": [1180, 40], "size": [190, 64] },
+    { "id": "flow", "type": "backend", "label": "test_tools.py", "sublabel": "logs · retry · report", "pos": [1180, 180], "size": [190, 64] },
+    { "id": "adb", "type": "backend", "label": "adb_tools.py", "sublabel": "device · Wi-Fi · media", "pos": [1180, 320], "size": [190, 64] },
+    { "id": "recipes", "type": "database", "label": "learned_recipes.json", "sublabel": "steps per phone profile", "pos": [1180, 460], "size": [190, 64] },
+    { "id": "ui", "type": "backend", "label": "ui_tools.py", "sublabel": "screen · tap · recipes", "pos": [1180, 600], "size": [190, 64] },
+    { "id": "yt", "type": "backend", "label": "youtube_tools.py", "sublabel": "built-in player steps", "pos": [1180, 740], "size": [190, 64] },
+    { "id": "bridge", "type": "external", "label": "ADB + uiautomator2", "sublabel": "USB debugging", "pos": [1500, 170], "size": [170, 650] },
+    { "id": "phone", "type": "frontend", "label": "Android phone", "sublabel": "YouTube app", "pos": [1500, 900], "size": [170, 64] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Your PC: ai_test_agent/ (Python)", "wraps": ["agent", "play", "llm", "registry", "sim", "flow", "adb", "ui", "yt", "reports", "recipes"] }
+  ],
+  "connections": [
+    { "id": "tester-agent", "from": "tester", "to": "agent", "label": "runs agent.py", "variant": "emphasis" },
+    { "id": "tester-play", "from": "tester", "to": "play", "label": "scripted run", "fromSide": "bottom", "toSide": "left" },
+    { "id": "play-agent", "from": "play", "to": "agent", "label": "--ai-fallback", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "id": "play-yt", "from": "play", "to": "yt", "label": "direct calls, no LLM", "fromSide": "right", "toSide": "bottom" },
+    { "id": "agent-llm", "from": "agent", "to": "llm", "label": "run_agent_loop", "variant": "emphasis" },
+    { "id": "llm-claude", "from": "llm", "to": "claude", "label": "messages + tools", "fromSide": "top", "toSide": "bottom" },
+    { "id": "llm-registry", "from": "llm", "to": "registry", "label": "dispatch(tool)", "variant": "emphasis" },
+    { "id": "registry-sim", "from": "registry", "to": "sim", "label": "--simulate", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "id": "registry-flow", "from": "registry", "to": "flow", "fromSide": "right", "toSide": "left" },
+    { "id": "registry-adb", "from": "registry", "to": "adb", "fromSide": "right", "toSide": "left" },
+    { "id": "registry-ui", "from": "registry", "to": "ui", "fromSide": "right", "toSide": "left" },
+    { "id": "registry-yt", "from": "registry", "to": "yt", "fromSide": "right", "toSide": "left" },
+    { "id": "flow-reports", "from": "flow", "to": "reports", "label": "write", "fromSide": "top", "toSide": "bottom" },
+    { "id": "ui-recipes", "from": "ui", "to": "recipes", "label": "replay / save", "fromSide": "top", "toSide": "bottom" },
+    { "id": "yt-ui", "from": "yt", "to": "ui", "label": "recipes first", "fromSide": "top", "toSide": "bottom" },
+    { "id": "flow-bridge", "from": "flow", "to": "bridge", "label": "logcat -d", "fromSide": "right", "toSide": "left" },
+    { "id": "adb-bridge", "from": "adb", "to": "bridge", "label": "adb shell", "fromSide": "right", "toSide": "left" },
+    { "id": "ui-bridge", "from": "ui", "to": "bridge", "label": "UI dump · tap", "fromSide": "right", "toSide": "left" },
+    { "id": "yt-bridge", "from": "yt", "to": "bridge", "label": "am start · tap", "fromSide": "right", "toSide": "left" },
+    { "id": "bridge-phone", "from": "bridge", "to": "phone", "label": "USB", "fromSide": "bottom", "toSide": "top" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "WHO", "items": [
+      "Tester: runs agent.py or play_youtube.py from a terminal",
+      "Claude (CLAUDE_MODEL, default claude-opus-5): decides the next step",
+      "Android phones over USB: the devices under test"
+    ] },
+    { "dot": "emerald", "title": "WHAT", "items": [
+      "Plays one YouTube URL on 1+ phones for --duration minutes",
+      "Turns on Stats for nerds and full screen, then checks that playback stays healthy",
+      "Ends with PASS / FAIL / NEEDS_HUMAN, saved as JSON in reports/"
+    ] },
+    { "dot": "violet", "title": "WHEN", "items": [
+      "play_youtube.py runs first at no token cost; --ai-fallback calls the AI only for phones that fail",
+      "agent.py runs the AI agent on every phone straight away",
+      "On later runs, saved recipes replay automatically, so a phone profile only has to be worked out once"
+    ] },
+    { "dot": "amber", "title": "WHERE", "items": [
+      "Python on your PC (ai_test_agent/); Claude API in the cloud",
+      "Phone reached through adb and the uiautomator2 jar in /data/local/tmp",
+      "State on disk: learned_recipes.json, reports/*.json, logs/*.log; settings in .env / config.py"
+    ] },
+    { "dot": "rose", "title": "WHY", "items": [
+      "YouTube's UI differs by maker, app version and language, so the English-only built-in locators break",
+      "The agent adapts by reading the screen, verifies the result, and saves it as a recipe",
+      "AI cost is paid once per YouTube version + language group, not once per phone"
+    ] },
+    { "dot": "orange", "title": "HOW: safety", "items": [
+      "Claude sees only 22 typed tools with no shell tool; device_id and URL are bound with functools.partial",
+      "Limits enforced in Python: MAX_TOOL_CALLS 60, MAX_LLM_TURNS 60, MAX_RETRIES 2",
+      "Monitoring refuses to start until Stats for nerds is visible",
+      "If a limit is hit, agent.py writes a NEEDS_HUMAN report itself"
+    ] },
+    { "dot": "slate", "title": "HOW: verification", "items": [
+      "Playback health comes from dumpsys media_session, polled every 5 s",
+      "Falls back to on-screen error text and the play/pause control",
+      "get_player_state checks fullscreen from player geometry, which works in any language",
+      "Note: README still mentions Appium, but the code uses uiautomator2 and needs no Appium server"
+    ] }
+  ]
+}

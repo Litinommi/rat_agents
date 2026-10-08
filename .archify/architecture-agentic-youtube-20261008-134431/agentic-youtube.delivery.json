@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "5d13f9a4-b66b-422b-b957-2111a0027549",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "C:\\Users\\LITIN\\Desktop\\myyyprojects\\agentic_youtube\\.archify\\architecture-agentic-youtube-20261008-134431\\candidate.json",
+  "output": "C:\\Users\\LITIN\\Desktop\\myyyprojects\\agentic_youtube\\.archify\\architecture-agentic-youtube-20261008-134431\\agentic-youtube.html",
+  "specification": {
+    "sha256": "5b6c16815c434823be68db473b95e4dfbbe5cf7335ceaed29a7bb550bb827f25",
+    "bytes": 8527
+  },
+  "artifact": {
+    "sha256": "93c63223fb959af4010d05324fa8fe4663da2e6354b4941cffafc6ec78acdf35",
+    "bytes": 782919
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "fail",
+  "type": "workflow",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\Users\\LITIN\\Desktop\\myyyprojects\\agentic_youtube\\.archify\\workflow-agentic-youtube-run-20261008-134431\\candidate.json",
+    "sha256": "34049281a3b18c9bc459c01164751d1a48377963db47fc15005a1f206df25637",
+    "bytes": 5409
+  },
+  "artifact": {
+    "path": "C:\\Users\\LITIN\\Desktop\\myyyprojects\\agentic_youtube\\.archify\\workflow-agentic-youtube-run-20261008-134431\\agentic-youtube-run.html",
+    "sha256": "bba5c09b9c352627c1f8440379426642110cc6b67ff694f9440f7c8e1a76c223",
+    "bytes": 767329
+  },
+  "gates": {
+    "validate": "fail",
+    "deliver": "not-run",
+    "check": "not-run",
+    "browser-check": "not-run"
+  },
+  "failedStage": "validate",
+  "diagnostics": [
+    {
+      "code": "composition/desktop-readability",
+      "severity": "error",
+      "message": "Final artifact failed composition/desktop-readability.",
+      "subject": {
+        "check": "composition",
+        "nodeId": "start"
+      },
+      "evidence": {
+        "owner": {
+          "kind": "node",
+          "id": "start"
+        },
+        "viewportWidth": 1440,
+        "viewportHeight": 900,
+        "availableDiagramWidth": 930,
+        "budgetBasis": "legacy-930",
+        "readerContract": "declared-wide-v1",
+        "requestedTargetPx": null,
+        "requestedTargetMet": null,
+        "budgetLimit": "legacy",
+        "viewBoxWidth": 1278,
+        "scale": 0.7276995305164319,
+        "text": "--devices --video-url",
+        "detail": "context",
+        "sourceFontPx": 8,
+        "projectedFontPx": 5.821596244131455,
+        "minimumProjectedFontPx": 6
+      },
+      "supportedFixes": [
+        "Preserve the semantic text and any supplied coordinates, routes, sides, channels, and labels. Compactly reflow automatic spacing and empty corridors so the complete viewBox width is at most 1240px (current 1278px; 8px source text at 930px desktop budget). If supplied geometry fixes that width, use a renderer-supported semantic text-size setting or renderer-level fix instead. Position-only label controls cannot repair its projection."
+      ]
+    }
+  ],
+  "diagnosticSummary": {
+    "total": 1,
+    "shown": 1,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\Users\\LITIN\\Desktop\\myyyprojects\\agentic_youtube\\.archify\\workflow-agentic-youtube-run-20261008-134431\\review-2\\agentic-youtube-run.finalize.json",
+    "summaryReceipt": "C:\\Users\\LITIN\\Desktop\\myyyprojects\\agentic_youtube\\.archify\\workflow-agentic-youtube-run-20261008-134431\\review-2\\agentic-youtube-run.finalize-summary.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.0.1",
+    "availableVersion": "3.0.1",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-08T08:15:04.659Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 1109,
+  "nextAction": {
+    "action": "edit-in-place",
+    "candidate": "C:\\Users\\LITIN\\Desktop\\myyyprojects\\agentic_youtube\\.archify\\workflow-agentic-youtube-run-20261008-134431\\candidate.json",
+    "constraint": "Preserve unaffected semantics and geometry; do not replace the whole candidate.",
+    "then": "finalize-once"
+  }
+}

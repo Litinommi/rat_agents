@@ -1,0 +1,69 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "agentic_youtube: One Test Run, Per Phone",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": ".archify/workflow-agentic-youtube-run-20261008-134431/agentic-youtube-run.html"
+  },
+  "lanes": [
+    { "id": "cli", "label": "CLI on your PC" },
+    { "id": "steps", "label": "Playback steps on the phone" },
+    { "id": "agent", "label": "Claude agent (agent.py or --ai-fallback)" },
+    { "id": "recover", "label": "Self-heal and recovery", "variant": "exception" },
+    { "id": "out", "label": "Saved outputs" }
+  ],
+  "phases": [
+    { "id": "startPhase", "label": "Start", "fromCol": 0, "toCol": 1 },
+    { "id": "setupPhase", "label": "Set up playback", "fromCol": 2, "toCol": 4, "variant": "emphasis" },
+    { "id": "verifyPhase", "label": "Verify + report", "fromCol": 5, "toCol": 5 }
+  ],
+  "mainPath": ["start", "preflight", "launch", "ads", "setup", "monitor", "report"],
+  "nodes": [
+    { "id": "start", "lane": "cli", "col": 0, "type": "external", "icon": "person", "label": "Tester", "sublabel": "--devices --video-url", "width": 150 },
+    { "id": "preflight", "lane": "cli", "col": 1, "type": "security", "label": "Pre-flight", "sublabel": "adb devices · URL · key", "width": 160 },
+    { "id": "launch", "lane": "steps", "col": 2, "type": "backend", "label": "Launch + open URL", "sublabel": "am start -W · deep link", "width": 160 },
+    { "id": "ads", "lane": "steps", "col": 3, "type": "backend", "label": "Clear ads", "sublabel": "skip or wait ≤120 s", "width": 150 },
+    { "id": "setup", "lane": "steps", "col": 4, "type": "backend", "label": "Stats + fullscreen", "sublabel": "recipe, then built-in", "tag": "gate: stats visible", "width": 165 },
+    { "id": "monitor", "lane": "steps", "col": 5, "type": "backend", "label": "Monitor playback", "sublabel": "media_session every 5 s", "width": 165 },
+    { "id": "decide", "lane": "agent", "col": 4, "type": "cloud", "label": "Claude picks a tool", "sublabel": "1 typed tool per turn", "tag": "≤60 calls · ≤60 turns", "width": 150 },
+    { "id": "heal", "lane": "recover", "col": 3, "type": "security", "label": "Read screen + tap", "sublabel": "get_screen · verify state", "width": 150 },
+    { "id": "diagnose", "lane": "recover", "col": 4, "type": "security", "label": "Diagnose + recover", "sublabel": "logs · Wi-Fi · retry ≤2", "width": 150 },
+    { "id": "recipes", "lane": "out", "col": 3, "type": "database", "label": "learned_recipes.json", "sublabel": "replayed on next run", "width": 160 },
+    { "id": "report", "lane": "out", "col": 5, "type": "database", "label": "Report JSON", "sublabel": "PASS · FAIL · NEEDS_HUMAN", "width": 160 }
+  ],
+  "edges": [
+    { "id": "start-preflight", "from": "start", "to": "preflight", "variant": "emphasis" },
+    { "id": "preflight-launch", "from": "preflight", "to": "launch", "label": "1 thread/phone", "variant": "emphasis" },
+    { "id": "launch-ads", "from": "launch", "to": "ads", "variant": "emphasis" },
+    { "id": "ads-setup", "from": "ads", "to": "setup", "variant": "emphasis" },
+    { "id": "setup-monitor", "from": "setup", "to": "monitor", "label": "stats visible", "variant": "emphasis" },
+    { "id": "monitor-report", "from": "monitor", "to": "report", "label": "healthy for duration", "variant": "emphasis" },
+    { "id": "setup-decide", "from": "setup", "to": "decide", "label": "step fails", "variant": "security", "role": "error", "fromSide": "bottom", "toSide": "top" },
+    { "id": "monitor-decide", "from": "monitor", "to": "decide", "label": "playback error", "variant": "security", "role": "error", "fromSide": "bottom", "toSide": "right" },
+    { "id": "decide-heal", "from": "decide", "to": "heal", "label": "unfamiliar UI", "role": "branch" },
+    { "id": "decide-diagnose", "from": "decide", "to": "diagnose", "label": "stall / network", "role": "branch" },
+    { "id": "heal-recipes", "from": "heal", "to": "recipes", "label": "save_recipe", "variant": "dashed" },
+    { "id": "diagnose-decide", "from": "diagnose", "to": "decide", "label": "fixed? retry", "variant": "dashed", "role": "return" },
+    { "id": "decide-report", "from": "decide", "to": "report", "label": "generate_report", "role": "branch" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Two ways to start", "items": [
+      "play_youtube.py: Python calls the steps in order with no AI and no tokens",
+      "agent.py: Claude calls every step itself, one tool per turn",
+      "play_youtube.py --ai-fallback sends one failed phone per YouTube version + language to Claude, then re-runs the rest for free with the new recipe"
+    ] },
+    { "dot": "emerald", "title": "Learning loop", "items": [
+      "Stats + fullscreen try saved recipes first: exact phone, then same YouTube version + language, then others",
+      "A recipe that works for a different profile is copied to this phone's profile",
+      "Some phones must first switch on Settings → General → Enable stats for nerds (a recipe-only step)"
+    ] },
+    { "dot": "rose", "title": "Hard stops", "items": [
+      "Pre-flight exits early if a phone is missing, the URL isn't YouTube, duration < 5 s, or there's no API key",
+      "Monitoring refuses to start until Stats for nerds is visible",
+      "retry_test is capped at 2; when the tool or turn budget runs out, agent.py writes a NEEDS_HUMAN report",
+      "Taps that leave YouTube are undone with Back and never saved"
+    ] }
+  ]
+}

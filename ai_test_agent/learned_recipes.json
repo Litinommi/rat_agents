@@ -1,0 +1,92 @@
+{
+  "Xiaomi|M2101K6P|yt21.39.522|en-IN": {
+    "enable_stats_for_nerds": [
+      {
+        "action": "tap",
+        "match": {
+          "resource_id": "com.google.android.youtube:id/player_overflow_button"
+        },
+        "reveal_player_controls": true
+      },
+      {
+        "action": "tap",
+        "match": {
+          "desc": "More"
+        },
+        "reveal_player_controls": false
+      },
+      {
+        "action": "tap",
+        "match": {
+          "desc": "Stats for nerds"
+        },
+        "reveal_player_controls": false
+      }
+    ],
+    "_notes": {
+      "enable_stats_for_nerds": "dry-run test",
+      "enable_stats_in_settings": "reused from realme|RMX3771|yt21.39.522|en-GB"
+    },
+    "enable_stats_in_settings": [
+      {
+        "action": "tap",
+        "match": {
+          "desc": "You"
+        }
+      },
+      {
+        "action": "tap",
+        "match": {
+          "desc": "Settings"
+        },
+        "wait_after": 2
+      },
+      {
+        "action": "tap",
+        "match": {
+          "text": "General"
+        },
+        "wait_after": 2
+      },
+      {
+        "action": "switch_on",
+        "match": {
+          "text": "Enable stats for nerds"
+        }
+      }
+    ]
+  },
+  "realme|RMX3771|yt21.39.522|en-GB": {
+    "enable_stats_in_settings": [
+      {
+        "action": "tap",
+        "match": {
+          "desc": "You"
+        }
+      },
+      {
+        "action": "tap",
+        "match": {
+          "desc": "Settings"
+        },
+        "wait_after": 2
+      },
+      {
+        "action": "tap",
+        "match": {
+          "text": "General"
+        },
+        "wait_after": 2
+      },
+      {
+        "action": "switch_on",
+        "match": {
+          "text": "Enable stats for nerds"
+        }
+      }
+    ],
+    "_notes": {
+      "enable_stats_in_settings": "Realme RMX3771: 'Stats for nerds' only appears in the player menu after this app setting is on (path found by inspecting the screen: You -> Settings -> General -> Enable stats for nerds)"
+    }
+  }
+}

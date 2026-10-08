@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "b6034b58-bed1-4b5b-8687-5f9a8c1d4be0",
+  "status": "current",
+  "command": "deliver",
+  "type": "workflow",
+  "input": "C:\\Users\\LITIN\\Desktop\\myyyprojects\\agentic_youtube\\.archify\\workflow-agentic-youtube-run-20261008-134431\\candidate.json",
+  "output": "C:\\Users\\LITIN\\Desktop\\myyyprojects\\agentic_youtube\\.archify\\workflow-agentic-youtube-run-20261008-134431\\agentic-youtube-run.html",
+  "specification": {
+    "sha256": "332410835d2807dbd5c66d84f87e7bf327dea59cdd6736331adc82fe62b64004",
+    "bytes": 5489
+  },
+  "artifact": {
+    "sha256": "077bb135211499668bc92931f24667382f0f233961e1d014b161cd51cdb4407b",
+    "bytes": 767348
+  }
+}
