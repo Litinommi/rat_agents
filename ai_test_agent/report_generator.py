@@ -56,6 +56,10 @@ def print_report(report: dict) -> None:
     print(f"Status: {report['status']}")
     print(f"Attempts: {report['attempts']}")
     print(f"Duration: {report['duration_seconds']} seconds")
+    if report.get("diagnostic_log"):
+        print(f"Diagnostic log: {report['diagnostic_log']}")
+    if report.get("saved_to"):
+        print(f"Report file: {report['saved_to']}")
     print(f"Failure observed: {'Yes' if report['failure_observed'] else 'No'}")
     if report["failure_observed"]:
         print(f"Root cause: {report['root_cause'] or 'unknown'}")

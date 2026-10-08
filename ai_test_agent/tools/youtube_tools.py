@@ -14,6 +14,10 @@ whole run. Selectors are plain dicts of uiautomator2 selector fields.
 
 import shlex
 import time
+import re
+import xml.etree.ElementTree as ET
+
+from diagnostics import record
 
 from config import MAX_WAIT_SECONDS, PLAYBACK_POLL_INTERVAL_SECONDS, YOUTUBE_APP_ACTIVITY, YOUTUBE_PACKAGE
 from tools import adb_tools
@@ -27,7 +31,7 @@ _PLAYER_OVERLAYS = {"resourceId": f"{YOUTUBE_PACKAGE}:id/player_overlays"}
 # match by id pattern rather than English labels like "Sponsored", which also
 # appear on non-ad promo cards below the video.
 _SKIP_AD = {"resourceIdMatches": r".*:id/(modern_)?skip_ad_button", "clickable": True}
-_AD = {"resourceIdMatches": r".*:id/(.*skip_ad.*|ad_.*)"}
+_AD_ID = re.compile(r".*:id/(?:(?:modern_)?skip_ad_button|ad_badge|ad_text|ad_progress_text|ad_countdown|ad_duration|ad_duration_remaining|ad_overlay.*)$")
 _FULLSCREEN = {"resourceId": f"{YOUTUBE_PACKAGE}:id/fullscreen_button"}
 # The player's settings entry: known id first; otherwise an id-less "More options"
 # button inside the player bounds (the app toolbar has another one above it).
@@ -109,9 +113,28 @@ def _reveal_and_find(driver, selector: dict, attempts: int = 5):
     return None
 
 
+def _ad_evidence(driver) -> list[dict]:
+    """Count player ad controls, excluding sponsored cards below the video."""
+    player = driver(**_PLAYER_OVERLAYS)
+    player_bounds = _bounds(player) if player.exists else None
+    evidence = []
+    for node in ET.fromstring(driver.dump_hierarchy()).iter("node"):
+        resource_id = node.get("resource-id", "")
+        if not _AD_ID.fullmatch(resource_id):
+            continue
+        bounds = [int(v) for v in re.findall(r"\d+", node.get("bounds", ""))]
+        if len(bounds) != 4 or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+            continue
+        x, y = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
+        if player_bounds and not (player_bounds["left"] <= x <= player_bounds["right"]
+                                  and player_bounds["top"] <= y <= player_bounds["bottom"]):
+            continue
+        evidence.append({"resource_id": resource_id, "bounds": bounds})
+    return evidence
+
+
 def _ad_showing(driver) -> bool:
-    # bool(): uiautomator2's .exists is a truthy wrapper object, not JSON-serialisable.
-    return bool(driver(**_AD).exists)
+    return bool(_ad_evidence(driver))
 
 
 # --- LLM-facing tools ---------------------------------------------------
@@ -172,10 +195,22 @@ def wait_for_ads(device_id: str, timeout_seconds: int = 120) -> dict:
                 skipped += 1
             # Only count "ad-free" once the real player is up - right after the
             # deep link the page is a loading skeleton with neither ad nor player.
-            clear_checks = 0 if _ad_showing(driver) or not player.exists else clear_checks + 1
+            evidence = _ad_evidence(driver)
+            player_present = bool(player.exists)
+            record("ad_poll", player_present=player_present, ad_evidence=evidence,
+                   skip_available=bool(skip.exists), ads_skipped=skipped, clear_checks=clear_checks)
+            clear_checks = 0 if evidence or not player_present else clear_checks + 1
             time.sleep(1)
         if clear_checks < _ADS_CLEAR_CHECKS:
-            return {"success": False, "error": f"Ads still showing after {timeout_seconds}s", "ads_skipped": skipped}
+            evidence = _ad_evidence(driver)
+            player_present = bool(player.exists)
+            reason = "Ads still showing" if evidence else "Player never became ready" if not player_present else "Player/ad state did not stabilize"
+            # Preserve UI evidence before the scripted runner closes the session.
+            record("ad_timeout", reason=reason, player_present=player_present, ad_evidence=evidence,
+                   ui_hierarchy=driver.dump_hierarchy())
+            return {"success": False, "error": f"{reason} after {timeout_seconds}s", "ads_skipped": skipped,
+                    "player_present": player_present, "ad_evidence": evidence,
+                    "hint": "Inspect get_screen and player state; timeout alone does not prove an ad or a network outage."}
         return {"success": True, "ads_skipped": skipped}
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": str(exc)}

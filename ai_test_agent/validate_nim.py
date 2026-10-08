@@ -2,9 +2,16 @@
 """Live NVIDIA NIM smoke checks. No device access and no secret output."""
 import json
 from nim_client import create_client, chat_completion, NIMError
+from diagnostics import diagnostic_run
 
 
 def main():
+    with diagnostic_run("provider-check", "validation") as log_path:
+        print(f"Diagnostic log: {log_path}")
+        return _main()
+
+
+def _main():
     try:
         with create_client() as client:
             for streaming in (False, True):

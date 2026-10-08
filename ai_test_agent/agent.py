@@ -16,9 +16,11 @@ import threading
 from urllib.parse import urlparse
 
 import report_generator
-from config import nim_configuration_error
+import log_collector
+from config import nim_configuration_error, NVIDIA_NIM_MODEL
 from llm_client import run_agent_loop
 from nim_client import NIMError
+from diagnostics import diagnostic_run, record, record_exception, sanitize
 from test_runner import TestState, build_tool_registry
 from tools import adb_tools, youtube_tools, test_tools
 from tools.simulate import SimulatedState
@@ -84,10 +86,14 @@ def _summarize_result(tool_name: str, result: dict) -> str:
         return (f"{result.get('manufacturer', '')} {result.get('model', '')} / Android {result.get('android_version', '?')} / "
                 f"YouTube {result.get('youtube_version', '?')} / locale {result.get('locale', '?')}")
     if tool_name == "get_wifi_status":
-        return "Wi-Fi connected" if result.get("connected") else "Wi-Fi disconnected"
+        association = result.get("connected")
+        label = "connected" if association is True else "disconnected" if association is False else "association unknown"
+        return f"Wi-Fi {label} (enabled={result.get('wifi_enabled')}, source={result.get('source', 'simulation')})"
     if tool_name == "toggle_wifi":
         if not result.get("success", True):
             return f"Failed to toggle Wi-Fi: {result.get('error')}"
+        if result.get("command_accepted"):
+            return f"Wi-Fi {'enable' if result.get('requested_enabled') else 'disable'} command accepted; network connection unverified"
         return f"Wi-Fi {'enabled' if result.get('wifi_enabled') else 'disabled'}"
     if tool_name == "launch_youtube":
         return "YouTube launched" if result.get("launched") else f"Launch failed: {result.get('error')}"
@@ -134,17 +140,20 @@ class DeviceConsole:
 
     def _print(self, line: str) -> None:
         with _print_lock:
-            print(f"{self.prefix}{line}", flush=True)
+            print(sanitize(f"{self.prefix}{line}"), flush=True)
 
     def on_assistant_text(self, text: str) -> None:
+        record("assistant_text", text=text)
         for line in text.splitlines():
             if line.strip():
                 self._print(f"[AGENT] {line.strip()}")
 
     def on_tool_call(self, name: str, tool_input: dict) -> None:
+        record("tool_call", tool=name, arguments=tool_input)
         self._print(f"[AGENT] {_NARRATION.get(name, lambda i: f'Calling {name}...')(tool_input)}")
 
     def on_tool_result(self, name: str, result: dict) -> None:
+        record("tool_result", tool=name, result=result)
         if name == "generate_report":
             return  # final report is printed separately once the run is over
         if name == "retry_test":
@@ -157,6 +166,13 @@ class DeviceConsole:
 
 
 def run_device(device_id: str, args: argparse.Namespace, duration_seconds: int, prefixed: bool, results: dict) -> None:
+    with diagnostic_run(device_id, "agent") as log_path:
+        DeviceConsole(device_id, prefixed)._print(f"[LOGS] Diagnostic log: {log_path}")
+        _run_device(device_id, args, duration_seconds, prefixed, results)
+        record("device_outcome", status=results.get(device_id))
+
+
+def _run_device(device_id: str, args: argparse.Namespace, duration_seconds: int, prefixed: bool, results: dict) -> None:
     console = DeviceConsole(device_id, prefixed)
     goal = args.goal or (
         f"Play {args.video_url} on this phone for {duration_seconds} seconds"
@@ -174,6 +190,11 @@ def run_device(device_id: str, args: argparse.Namespace, duration_seconds: int, 
         fullscreen=args.fullscreen,
         stats_for_nerds=args.stats_for_nerds,
     )
+    state.initial_failure = getattr(args, "initial_failure", None)
+    state.failure_observed = bool(state.initial_failure)
+    record("agent_configuration", goal=goal, model=NVIDIA_NIM_MODEL,
+           initial_failure=getattr(args, "initial_failure", None), simulate=args.simulate,
+           duration_seconds=duration_seconds)
     dispatch = build_tool_registry(state, sim)
 
     try:
@@ -200,12 +221,18 @@ def run_device(device_id: str, args: argparse.Namespace, duration_seconds: int, 
                 root_cause=reason,
             )
     except NIMError as exc:
+        record_exception("agent_inference_failure", exc)
         console._print(f"[AGENT] {exc}")
+        if not args.simulate:
+            evidence = log_collector.capture_failure(device_id, str(exc))
+            if evidence.get("success"):
+                console._print(f"[LOGS] Device logcat: {evidence['log_file']}")
         test_tools.generate_report(
             device_id, status="NEEDS_HUMAN", summary=str(exc), state=state,
             root_cause=str(exc),
         )
     except Exception as exc:  # noqa: BLE001 - one device's crash must not take down the others
+        record_exception("agent_crash", exc)
         console._print(f"[AGENT] Run crashed ({type(exc).__name__}).")
     finally:
         if not args.simulate:

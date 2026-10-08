@@ -12,9 +12,13 @@ Usage:
 import argparse
 import sys
 import threading
+import time
+
+import log_collector
 from urllib.parse import urlparse
 
 from config import PLAYBACK_POLL_INTERVAL_SECONDS
+from diagnostics import diagnostic_run, record, record_exception, sanitize
 from tools import adb_tools, youtube_tools, ui_tools
 
 # get_playback_status caps a single call at 180s, so long runs are
@@ -26,19 +30,40 @@ _print_lock = threading.Lock()
 
 
 def _log(device_id: str, message: str) -> None:
+    record("console", message=message)
     with _print_lock:
-        print(f"[{device_id}] {message}", flush=True)
+        print(sanitize(f"[{device_id}] {message}"), flush=True)
 
 
 def _play_on_device(device_id: str, url: str, duration_seconds: int, options: argparse.Namespace, results: dict) -> None:
+    with diagnostic_run(device_id, "scripted") as log_path:
+        _log(device_id, f"Diagnostic log: {log_path}")
+        _play_on_device_impl(device_id, url, duration_seconds, options, results)
+        record("device_outcome", failure=results.get(device_id))
+
+
+def _play_on_device_impl(device_id: str, url: str, duration_seconds: int, options: argparse.Namespace, results: dict) -> None:
     """results[device_id] = None on PASS, else a "step: reason" string
     describing the first failure (handed to the AI agent with --ai-fallback)."""
     failure = "did not finish"
+
+    def call_tool(name, *args):
+        started = time.monotonic()
+        record("scripted_tool_started", tool=name)
+        try:
+            result = getattr(youtube_tools, name)(*args)
+            record("scripted_tool_result", tool=name, result=result,
+                   duration_seconds=round(time.monotonic() - started, 3))
+            return result
+        except Exception as exc:
+            record_exception("scripted_tool_error", exc)
+            raise
 
     def setup_problem(step: str, result: dict) -> bool:
         """Log a setup step. A failure is only a warning in plain mode, but
         with --ai-fallback we stop so the agent can take over from here."""
         nonlocal failure
+        record("scripted_step", tool=step, result=result)
         if result.get("success"):
             return False
         failure = f"{step}: {result.get('error')}"
@@ -46,21 +71,21 @@ def _play_on_device(device_id: str, url: str, duration_seconds: int, options: ar
         return options.ai_fallback
 
     try:
-        launch = youtube_tools.launch_youtube(device_id)
+        launch = call_tool("launch_youtube", device_id)
         if not launch["success"]:
             failure = f"launch_youtube: {launch.get('error')}"
             _log(device_id, f"FAIL {failure}")
             return
         _log(device_id, "OK   launched YouTube")
 
-        opened = youtube_tools.open_video_url(device_id, url)
+        opened = call_tool("open_video_url", device_id, url)
         if not opened["success"]:
             failure = f"open_video_url: {opened.get('error')}"
             _log(device_id, f"FAIL {failure}")
             return
         _log(device_id, f"OK   opened {url}")
 
-        ads = youtube_tools.wait_for_ads(device_id)
+        ads = call_tool("wait_for_ads", device_id)
         if setup_problem("wait_for_ads", ads):
             return
         if ads["success"]:
@@ -68,20 +93,20 @@ def _play_on_device(device_id: str, url: str, duration_seconds: int, options: ar
 
         # Stats first: the player menu is easier to reach before rotating.
         if options.stats_for_nerds:
-            stats = youtube_tools.enable_stats_for_nerds(device_id)
+            stats = call_tool("enable_stats_for_nerds", device_id)
             if not stats["success"]:
                 # Some phones only list "Stats for nerds" in the More menu once it's switched
                 # on in YouTube's settings. That fix comes from saved recipes only - with no
                 # recipe this phone fails here (and --ai-fallback hands it to the AI agent).
                 _log(device_id, f"...  stats for nerds not available ({stats.get('error')}); "
                                 "checking saved recipes for the 'Enable stats for nerds' setting")
-                setting = youtube_tools.enable_stats_in_app_settings(device_id)
+                setting = call_tool("enable_stats_in_app_settings", device_id)
                 if setting["success"]:
                     _log(device_id, "OK   'Enable stats for nerds' setting turned on by saved recipe"
                                     f" (from {setting.get('recipe_from', 'this phone')})")
-                    youtube_tools.open_video_url(device_id, url)
-                    youtube_tools.wait_for_ads(device_id)
-                    stats = youtube_tools.enable_stats_for_nerds(device_id)
+                    call_tool("open_video_url", device_id, url)
+                    call_tool("wait_for_ads", device_id)
+                    stats = call_tool("enable_stats_for_nerds", device_id)
                 else:
                     _log(device_id, f"...  {setting.get('error')}")
             if setup_problem("enable_stats_for_nerds", stats):
@@ -89,7 +114,7 @@ def _play_on_device(device_id: str, url: str, duration_seconds: int, options: ar
             if stats["success"]:
                 _log(device_id, "OK   stats for nerds enabled")
         if options.fullscreen:
-            fs = youtube_tools.enter_fullscreen(device_id)
+            fs = call_tool("enter_fullscreen", device_id)
             if setup_problem("enter_fullscreen", fs):
                 return
             if fs["success"]:
@@ -97,7 +122,7 @@ def _play_on_device(device_id: str, url: str, duration_seconds: int, options: ar
 
         # Monitoring only counts with Stats for nerds on screen - verify it right
         # before starting (an earlier step failing or a later one closing it).
-        if options.stats_for_nerds and not youtube_tools.get_player_state(device_id).get("stats_for_nerds_visible"):
+        if options.stats_for_nerds and not call_tool("get_player_state", device_id).get("stats_for_nerds_visible"):
             failure = "enable_stats_for_nerds: overlay not visible, so playback monitoring was not started"
             _log(device_id, f"FAIL {failure}")
             return
@@ -106,7 +131,7 @@ def _play_on_device(device_id: str, url: str, duration_seconds: int, options: ar
         monitored = 0
         while monitored < duration_seconds:
             chunk = min(_MONITOR_CHUNK_SECONDS, duration_seconds - monitored)
-            status = youtube_tools.get_playback_status(device_id, chunk)
+            status = call_tool("get_playback_status", device_id, chunk)
             monitored += status.get("seconds_monitored", 0)
             if status.get("error_detected"):
                 failure = f"playback after {monitored}s: {status.get('error_message')}"
@@ -120,9 +145,13 @@ def _play_on_device(device_id: str, url: str, duration_seconds: int, options: ar
         failure = None
         _log(device_id, f"PASS played for {monitored}s")
         if not options.keep_playing:
-            youtube_tools.stop_video(device_id)
+            call_tool("stop_video", device_id)
     finally:
-        youtube_tools.quit_session(device_id)
+        if failure:
+            evidence = log_collector.capture_failure(device_id, failure)
+            if evidence.get("success"):
+                _log(device_id, f"Device logcat: {evidence['log_file']}")
+        call_tool("quit_session", device_id)
         results[device_id] = failure
 
 
@@ -152,6 +181,7 @@ def _run_ai_fallback(failed: dict[str, str], args: argparse.Namespace, duration_
                 + (" in full screen" if args.fullscreen else "")
                 + ". Save a recipe for any step you had to work out yourself."
             ),
+            initial_failure=failure,
             simulate=False,
             inject_failure=False,
             sim_unfamiliar_ui=False,

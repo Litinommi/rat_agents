@@ -9,6 +9,7 @@ import subprocess
 from datetime import datetime, timezone
 
 from config import ADB_TIMEOUT_SECONDS, LOG_DIR, LOGCAT_LINE_LIMIT, YOUTUBE_PACKAGE
+from diagnostics import record, sanitize
 
 
 def capture_logcat(device_id: str, reason: str = "") -> dict:
@@ -25,6 +26,8 @@ def capture_logcat(device_id: str, reason: str = "") -> dict:
             ["adb", "-s", device_id, "logcat", "-d", "-t", str(LOGCAT_LINE_LIMIT)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=ADB_TIMEOUT_SECONDS,
             check=False,
         )
@@ -33,10 +36,15 @@ def capture_logcat(device_id: str, reason: str = "") -> dict:
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "logcat capture timed out"}
 
-    lines = result.stdout.splitlines()
+    if result.returncode != 0:
+        return {"success": False, "error": sanitize(result.stderr.strip() or "adb logcat failed"),
+                "exit_code": result.returncode}
+    output = sanitize(result.stdout)
+    lines = output.splitlines()
     relevant = [ln for ln in lines if YOUTUBE_PACKAGE in ln or "wifi" in ln.lower()] or lines
 
-    out_path.write_text(result.stdout, encoding="utf-8")
+    out_path.touch(mode=0o600)
+    out_path.write_text(output, encoding="utf-8")
 
     return {
         "success": True,
@@ -65,3 +73,13 @@ def capture_simulated(reason: str = "") -> dict:
         "relevant_lines": 2,
         "excerpt": fake_log.strip(),
     }
+
+
+def capture_failure(device_id: str, reason: str) -> dict:
+    """Best-effort evidence collection must never overwrite the original failure."""
+    try:
+        result = capture_logcat(device_id, reason)
+    except Exception as exc:
+        result = {"success": False, "error": f"Log capture failed ({type(exc).__name__})"}
+    record("failure_logcat", result=result)
+    return result

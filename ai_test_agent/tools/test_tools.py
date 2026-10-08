@@ -7,6 +7,7 @@ explicit stop condition (generate_report) and its bounded recovery path
 
 import log_collector
 import report_generator
+from diagnostics import current_log_path
 from config import MAX_RETRIES
 from tools import youtube_tools
 from tools.simulate import SimulatedState
@@ -84,6 +85,8 @@ def generate_report(
         # Snapshot history before the registry records this terminal tool result.
         tool_history=list(state.tool_history),
     )
+    report["diagnostic_log"] = current_log_path()
+    report["initial_failure"] = getattr(state, "initial_failure", None)
     saved_path = report_generator.save_report(report)
     report["saved_to"] = saved_path
 

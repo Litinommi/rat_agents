@@ -1,6 +1,11 @@
 """NVIDIA-only transport, safe API errors, and streamed tool-call assembly."""
+import time
+import uuid
+import json
 import httpx
 from openai import OpenAI, APIConnectionError, APIStatusError, APITimeoutError
+
+from diagnostics import record, record_exception, sanitize
 
 from config import (
     NVIDIA_NIM_API_KEY, NVIDIA_NIM_BASE_URL, NVIDIA_NIM_MODEL,
@@ -13,12 +18,41 @@ class NIMError(RuntimeError):
     """A user-facing error that never includes provider bodies or credentials."""
 
 
+def _request_log(request):
+    request.extensions["diagnostic_started"] = time.monotonic()
+    record("nim_http_attempt", method=request.method, endpoint=str(request.url.copy_with(query=None)),
+           retry_number=request.headers.get("x-stainless-retry-count", "0"))
+
+
+def _response_log(response):
+    request_id = next((response.headers.get(k) for k in ("x-request-id", "request-id", "nvcf-reqid", "nvcf-request-id")
+                       if response.headers.get(k)), None)
+    details = {}
+    if response.status_code >= 400:
+        response.read()
+        try:
+            body = response.json()
+            error = body.get("error", body) if isinstance(body, dict) else {}
+            if isinstance(error, dict):
+                details = {k: error[k] for k in ("type", "code", "message", "detail") if k in error}
+            elif isinstance(error, str):
+                details = {"message": error}
+            if not details and isinstance(body, dict):
+                details = {k: body[k] for k in ("detail", "message", "title") if k in body}
+        except ValueError:
+            details = {"message": response.text[:2000]}
+    record("nim_http_response", status=response.status_code, request_id=request_id,
+           retry_after=response.headers.get("retry-after"), error=details,
+           duration_seconds=round(time.monotonic() - response.request.extensions.get("diagnostic_started", time.monotonic()), 3))
+
+
 def create_client():
     if error := nim_configuration_error():
         raise NIMError(error)
     return OpenAI(
         base_url=NVIDIA_NIM_BASE_URL, api_key=NVIDIA_NIM_API_KEY,
         timeout=NVIDIA_NIM_TIMEOUT_SECONDS, max_retries=2,
+        http_client=httpx.Client(event_hooks={"request": [_request_log], "response": [_response_log]}),
     )
 
 
@@ -33,6 +67,12 @@ def chat_completion(client, messages, *, tools=None, stream=None, on_text=lambda
                    max_tokens=NVIDIA_NIM_MAX_TOKENS, stream=streaming)
     if tools:
         options.update(tools=tools, tool_choice="auto")
+    completion_id = uuid.uuid4().hex[:12]
+    started = time.monotonic()
+    record("nim_completion_started", completion_id=completion_id, model=NVIDIA_NIM_MODEL,
+           streaming=streaming, max_tokens=NVIDIA_NIM_MAX_TOKENS, message_count=len(messages),
+           message_roles=[m["role"] for m in messages], tool_count=len(tools or []),
+           history_bytes=len(json.dumps(messages).encode()))
     try:
         response = client.chat.completions.create(**options)
         if not streaming:
@@ -77,6 +117,9 @@ def chat_completion(client, messages, *, tools=None, stream=None, on_text=lambda
             calls = [calls_by_index[index] for index in sorted(calls_by_index)]
             if finish is None:
                 raise NIMError("NVIDIA NIM stream ended before completion. No tool calls were executed.")
+        record("nim_completion_received", completion_id=completion_id, finish_reason=finish,
+               duration_seconds=round(time.monotonic() - started, 3),
+               tool_names=[call["function"].get("name") for call in calls], text_chars=len(content))
         if finish == "length":
             raise NIMError("NVIDIA NIM response was truncated. Adjust NVIDIA_NIM_MAX_TOKENS within the model's limit.")
         if refused or finish == "content_filter":
@@ -90,12 +133,23 @@ def chat_completion(client, messages, *, tools=None, stream=None, on_text=lambda
         if calls:
             message["tool_calls"] = calls
         return message, False
-    except (APITimeoutError, httpx.TimeoutException):
+    except NIMError as exc:
+        record_exception("nim_completion_error", exc)
+        raise
+    except (APITimeoutError, httpx.TimeoutException) as exc:
+        record("nim_completion_error", completion_id=completion_id, category="timeout", exception_type=type(exc).__name__)
         raise NIMError("NVIDIA NIM request timed out. Retry or adjust NVIDIA_NIM_TIMEOUT_SECONDS.") from None
-    except (APIConnectionError, httpx.TransportError):
+    except (APIConnectionError, httpx.TransportError) as exc:
+        record("nim_completion_error", completion_id=completion_id, category="network", exception_type=type(exc).__name__)
         raise NIMError("Cannot connect to NVIDIA NIM. Check your network and retry.") from None
     except APIStatusError as exc:
         status = exc.status_code
+        request_id = getattr(exc, "request_id", None) or exc.response.headers.get("nvcf-reqid")
+        # Logs retain only allowlisted provider error fields, never request headers or full payloads.
+        body = exc.body if isinstance(exc.body, dict) else {}
+        error = body.get("error", body)
+        details = {k: error[k] for k in ("type", "code", "message", "detail") if k in error} if isinstance(error, dict) else {}
+        record("nim_completion_error", completion_id=completion_id, status=status, request_id=request_id, error=details)
         if status in (401, 403):
             message = "NVIDIA NIM authentication failed. Check NVIDIA_NIM_API_KEY and model access."
         elif status == 429:
@@ -105,4 +159,6 @@ def chat_completion(client, messages, *, tools=None, stream=None, on_text=lambda
                        "and model support for tool calling, streaming, and vision.")
         else:
             message = f"NVIDIA NIM request failed (HTTP {status}). Retry or check NVIDIA service status."
+        if request_id:
+            message += f" Request ID: {sanitize(request_id)}."
         raise NIMError(message) from None

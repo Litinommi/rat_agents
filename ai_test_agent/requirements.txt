@@ -1,4 +1,9 @@
+# OpenAI-compatible client library; inference uses NVIDIA NIM exclusively.
 openai>=1.68.0,<3
+# Imported directly for transport error handling and offline protocol tests.
+httpx>=0.23.0,<1
+
+# Local configuration and Android UI automation.
 python-dotenv>=1.0.1
 uiautomator2>=3.7.0
 pillow>=10.0.0

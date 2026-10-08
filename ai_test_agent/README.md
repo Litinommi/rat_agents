@@ -1,305 +1,315 @@
 # AI Test Agent — YouTube Playback PoC
 
-A small, genuinely agentic proof of concept for **"AI Agents for Real-World
-Application Test Automation."** the NVIDIA NIM model drives a real Android device over
-ADB + Appium to run a YouTube playback test, diagnoses failures from real
-tool output, decides on a recovery action, verifies it, and produces a
-final PASS/FAIL/NEEDS_HUMAN report — all through explicit function/tool
-calling, never free-form shell text.
+An AI agent tests YouTube playback on Android devices using ADB and
+uiautomator2. A NVIDIA NIM model selects predefined tools, diagnoses failures,
+verifies recovery, and produces a PASS, FAIL, or NEEDS_HUMAN report. The agent
+can inspect unfamiliar interfaces and save verified UI steps as reusable recipes.
 
-## Architecture
-
-```
-CLI (agent.py) --device <ID> "<goal>"
-        │
-        ├─ adb devices          → fail fast if <ID> isn't connected
-        │
-        ▼
-  TestState (test_runner.py)     — attempts, tool-call history, status
-        │
-        ▼
-  Tool registry: {name: partial(fn, device_id=<ID>, ...)}
-        │
-        ▼
-┌────────────── Agentic loop (llm_client.py) ───────────────────┐
-│ send messages + tool schemas → NVIDIA_NIM_MODEL                   │
-│  ├─ tool_calls? → print [AGENT] narration                        │
-│  │    → dispatch ONE registry function (never arbitrary code)  │
-│  │    → print [ADB]/[APPIUM]/[TEST]/[LOGS] result              │
-│  │    → append role=tool results, loop                                │
-│  └─ generate_report called → stop                              │
-│ hard safety valves (MAX_TOOL_CALLS, MAX_RETRIES, MAX_LLM_TURNS) │
-│ are enforced in Python, independent of what the model decides  │
-└─────────────────────────────────────────────────────────────┘
-        │
-        ▼
-  report_generator.py → console block + JSON file under reports/
-```
-
-**Key safety property:** `device_id` is never a tool parameter the NVIDIA NIM model
-fills in. It's bound into every tool function via `functools.partial`
-when `test_runner.build_tool_registry()` runs, so the model has no path
-to targeting a different device — it can only pick *which* predefined
-tool to call and *what typed arguments* (a query string, a boolean, a
-duration) to pass.
-
-## Project structure
-
-```
-ai_test_agent/
-├── agent.py            CLI entry point, console narration, top-level flow
-├── llm_client.py        Tool schemas, system prompt, manual agentic loop
-├── nim_client.py        NVIDIA transport, streaming assembly, safe API errors
-├── validate_nim.py      Live chat/stream/tool smoke checks
-├── test_runner.py       TestState, tool registry, safety-limit enforcement
-├── tools/
-│   ├── adb_tools.py      check_device, get_device_info, get_wifi_status, toggle_wifi
-│   ├── appium_tools.py   launch_youtube, search_youtube, play_video, stop_video, get_playback_status
-│   ├── test_tools.py     collect_logs, retry_test, generate_report
-│   └── simulate.py       deterministic fake backend for --simulate
-├── log_collector.py     logcat capture
-├── report_generator.py  final report: build, print, save
-├── config.py             all tunables (env-driven)
-├── requirements.txt
-├── .env.example
-└── README.md
-```
-
-## Tools available to the agent
-
-| Tool | Backend | Purpose |
-|---|---|---|
-| `check_device()` | ADB | Confirm the target device is connected |
-| `get_device_info()` | ADB | Model, manufacturer, Android version |
-| `get_wifi_status()` | ADB | Wi-Fi enabled / connected |
-| `toggle_wifi(enabled)` | ADB (`svc wifi`) | The agent's one concrete recovery action |
-| `launch_youtube()` | Appium | Launch/foreground the YouTube app |
-| `search_youtube(query)` | Appium | Type + submit a search |
-| `play_video()` | Appium | Tap the first result |
-| `stop_video()` | Appium | Back out of the player |
-| `get_playback_status(duration_seconds)` | Appium | Monitor the player, detect stalls/errors |
-| `collect_logs(reason)` | logcat | Capture recent YouTube/Wi-Fi-relevant log lines |
-| `retry_test(reason)` | compound | Re-run stop→relaunch→search→play; capped at `MAX_RETRIES` |
-| `generate_report(status, summary, root_cause, recovery_action)` | — | Terminal tool; ends the loop |
-
-Only these 12 functions are ever exposed to the NVIDIA NIM model (as JSON tool
-schemas in `llm_client.py`). There is no "run shell command" tool, and
-none of the Python tool implementations interpolate LLM-provided text
-into a shell command — every `adb`/Appium call is built from a fixed
-argument list plus typed, schema-validated parameters.
+The OpenAI SDK is the compatible client library. All inference requests use
+`https://integrate.api.nvidia.com/v1`; no OpenAI API key is required or used.
 
 ## Prerequisites
 
-### Android / ADB
-- Android SDK Platform Tools installed, `adb` on your `PATH`.
-- A device (or emulator) with **USB debugging** enabled, connected and
-  authorized (`adb devices` shows it as `device`, not `unauthorized`).
-- The YouTube app installed and signed in (recommended, though not
-  required — signed-out playback works too).
+- Python 3.10 or newer; validation during this migration used Python 3.12.
+- For real devices: Android SDK Platform Tools with `adb` on your `PATH`.
+- An Android phone or emulator with USB debugging enabled and authorized.
+  `adb devices` must show it in the `device` state.
+- YouTube installed on the target device.
+- For AI runs: a NVIDIA-issued API key and a NVIDIA NIM model supporting
+  OpenAI-compatible function calling with `tool_choice=auto`. Choose a model
+  and check its capabilities in the [NVIDIA API Catalog](https://build.nvidia.com/).
 
-### Appium
-- Node.js, then:
-  ```bash
-  npm install -g appium
-  appium driver install uiautomator2
-  appium   # starts the server on http://127.0.0.1:4723 by default
-  ```
-- Leave the Appium server running in its own terminal while you run the agent.
-
-### NVIDIA NIM API
-- Obtain a NVIDIA API key and choose a model at https://build.nvidia.com/.
-- `pip install -r requirements.txt`
-- Copy `.env.example` to `.env` and set both `NVIDIA_NIM_API_KEY` and `NVIDIA_NIM_MODEL`.
-- The OpenAI SDK is only the client library. Requests always use
-  `https://integrate.api.nvidia.com/v1`; no OpenAI key is used.
-- The model must support OpenAI-compatible function calling (`tool_choice=auto`).
-  Check its NVIDIA API Catalog documentation for availability and token limits.
+Device automation uses the Python `uiautomator2` package. An Appium server and
+Node.js are not required. Simulated devices need neither ADB nor Android hardware,
+but the agent still uses live NVIDIA inference unless running the offline tests.
 
 ## Setup
 
+Run these commands from `ai_test_agent`:
+
 ```bash
-cd ai_test_agent
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # macOS/Linux
-pip install -r requirements.txt
-copy .env.example .env        # Windows: copy, macOS/Linux: cp
-# edit .env and set NVIDIA_NIM_API_KEY and NVIDIA_NIM_MODEL
 ```
+
+Activate the environment on macOS/Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+Or on Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+Install dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Copy `.env.example` to `.env` using `cp .env.example .env` on macOS/Linux or
+`Copy-Item .env.example .env` in PowerShell. If `.env` already exists, edit it
+instead of replacing your device settings.
+
+Set both required values:
+
+```ini
+NVIDIA_NIM_API_KEY=your_nvidia_nim_api_key
+NVIDIA_NIM_MODEL=your_supported_model_id
+```
+
+Replace the placeholders with your NVIDIA key and a supported model ID.
+Environment variables override the `.env` file next to `config.py`. Keep `.env`
+private; Git ignores it. Never put keys in prompts, frontend code, or logs.
+
+For an existing environment, installing requirements replaces the declared SDK
+dependency but does not uninstall previously installed packages. The application
+no longer uses the Anthropic SDK or its environment settings. Remove its old
+settings from your local `.env`; if no other project uses that environment, you
+can remove the unused SDK with `python -m pip uninstall anthropic`.
+
+## NVIDIA NIM configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `NVIDIA_NIM_API_KEY` | Required | NVIDIA API key used for Bearer authentication |
+| `NVIDIA_NIM_MODEL` | Required | Model ID; no automatic default or fallback model |
+| `NVIDIA_NIM_MAX_TOKENS` | `4096` | Output token budget; stay within the selected model's limit |
+| `NVIDIA_NIM_STREAM` | `false` | Enable live console narration as complete lines arrive |
+| `NVIDIA_NIM_VISION` | `false` | Send screenshots to a model supporting images and tools |
+| `NVIDIA_NIM_TIMEOUT_SECONDS` | `120` | SDK request timeout; must be positive |
+
+The base URL is fixed in `config.py` to the NVIDIA endpoint. The SDK makes up to
+two retries for eligible transient request failures. The application does not
+switch models or inference providers after an error.
+
+Function calling is required for the agent workflow. Streaming and vision depend
+on the selected model. With vision disabled, the model receives UI element lists
+and player state. With vision enabled, screenshots are JPEG `image_url` data URLs
+in a user message following all tool results. Screenshot bytes are excluded from
+saved tool history, reports, and console tool results.
+
+The previous provider's thinking flags, ephemeral cache controls, beta headers,
+and server-side fallbacks are no longer sent. Reasoning, caching, and feature
+availability depend on the NVIDIA model/service. Consult the
+[NVIDIA API reference](https://docs.api.nvidia.com/nim/reference/llm-apis)
+for model-specific capabilities.
 
 ## Running
 
-List connected devices:
+All examples below run from `ai_test_agent`. `--duration` is in **minutes**;
+`agent.py` defaults to one minute and requires at least five seconds.
+
+List devices:
 
 ```bash
 python agent.py --list-devices
 ```
 
-Run a real test against a specific device:
+Run a one-minute test on a real device, replacing the device ID and video URL:
 
 ```bash
-python agent.py --device 1A271FDF600B0E "Run a YouTube playback test for 60 seconds"
+python agent.py --devices DEVICE_ID --video-url "https://www.youtube.com/watch?v=VIDEO_ID" --duration 1
 ```
 
-Optional flags:
+Several devices run in parallel:
 
 ```bash
-python agent.py --device 1A271FDF600B0E "Run a YouTube playback test" \
-  --duration 45 \
-  --search-query "coding lofi mix"
+python agent.py --devices DEVICE_1 DEVICE_2 --video-url "https://www.youtube.com/watch?v=VIDEO_ID" --duration 1
 ```
 
-### Demo mode (no hardware required)
-
-For rehearsing the failure → diagnosis → recovery flow without fighting
-venue Wi-Fi or a flaky device:
+Fullscreen and Stats for nerds are enabled by default. Disable them or add an
+extra natural-language instruction using the supported flags:
 
 ```bash
-# Clean pass, fully simulated
-python agent.py --device DEMO123 --simulate "Run a YouTube playback test for 30 seconds"
-
-# Deterministically fail the first playback attempt (Wi-Fi drops mid-test),
-# so you can show the agent diagnose and recover live
-python agent.py --device DEMO123 --simulate --inject-failure "Run a YouTube playback test for 30 seconds"
+python agent.py --devices DEVICE_ID --video-url "https://youtu.be/VIDEO_ID" --duration 0.5 --no-fullscreen --no-stats-for-nerds --goal "Verify playback and explain any recovery actions."
 ```
 
-`--simulate` swaps every ADB/Appium call for a fake in-memory backend
-(`tools/simulate.py`) — same tool schemas, same agentic loop, same
-safety limits — so the reasoning you see is genuinely the NVIDIA NIM model deciding
-what to do next, not a scripted transcript.
+### Simulated devices
 
-## Example run
+These examples use fake device/app state and live NVIDIA inference:
 
-```
-========================================
- AI TEST AGENT
-========================================
-
-Device: 1A271FDF600B0E
-Goal: Run a YouTube playback test for 60 seconds
-
-[AGENT] Checking device...
-[ADB] Device connected
-
-[AGENT] Checking Wi-Fi status...
-[ADB] Wi-Fi connected
-
-[AGENT] Launching YouTube...
-[APPIUM] YouTube launched
-
-[AGENT] Searching for "lofi hip hop radio"...
-[APPIUM] Searched for "lofi hip hop radio"
-
-[AGENT] Starting playback...
-[APPIUM] Video started
-
-[AGENT] Monitoring playback for 60s...
-[TEST] Playback healthy for 60s
-
-[AGENT] Finalizing report...
-
-========================================
- FINAL RESULT
-========================================
-Device: 1A271FDF600B0E
-Goal: Run a YouTube playback test for 60 seconds
-Status: PASS
-Attempts: 1
-Duration: 60 seconds
-Failure observed: No
-========================================
+```bash
+python agent.py --devices DEMO123 --video-url "https://youtu.be/VIDEO_ID" --duration 0.5 --simulate
+python agent.py --devices DEMO123 --video-url "https://youtu.be/VIDEO_ID" --duration 0.5 --simulate --inject-failure
+python agent.py --devices DEMO123 --video-url "https://youtu.be/VIDEO_ID" --duration 0.5 --simulate --sim-unfamiliar-ui
 ```
 
-With `--inject-failure`, playback stalls partway through, and the NVIDIA NIM model —
-not a hardcoded branch — decides to collect logs, re-check Wi-Fi, toggle
-it back on, verify, and retry, ending in a PASS with `Attempts: 2` and
-`Recovery: Successful`.
+`--inject-failure` simulates a network failure on the first playback attempt.
+`--sim-unfamiliar-ui` makes the built-in Stats for nerds step fail on a simulated
+Spanish interface, allowing the agent to practice UI inspection and adaptation.
+A successful recovery depends on the model's actions; it is not guaranteed.
 
-Every run also writes a JSON report to `reports/` and captured logs to
-`logs/`.
+### Scripted playback and optional AI fallback
+
+The scripted runner needs no inference key unless `--ai-fallback` is enabled:
+
+```bash
+python play_youtube.py --devices DEVICE_ID --video-url "https://youtu.be/VIDEO_ID" --duration 1
+python play_youtube.py --devices DEVICE_ID --video-url "https://youtu.be/VIDEO_ID" --duration 1 --ai-fallback
+```
+
+It tries built-in steps and saved recipes first. AI fallback groups failed
+phones by YouTube version and language, attempts a repair on one representative,
+and replays learned steps on similar phones. `--keep-playing` leaves playback
+running after a successful scripted test. Use `--help` on either entry point
+for its full CLI options.
+
+## Architecture and tools
+
+```text
+agent.py / play_youtube.py --ai-fallback
+  -> TestState + registry bound to one device
+  -> llm_client.py: system prompt, tool schemas, conversation loop
+  -> nim_client.py: OpenAI SDK -> NVIDIA NIM /chat/completions
+  -> predefined Python tools -> ADB / uiautomator2 (or simulated device)
+  -> matching tool results in conversation history
+  -> final report
+```
+
+History consists of a system prompt, user goal, assistant `tool_calls`, and
+matching `role=tool` results. Streamed tool names and JSON argument fragments are
+assembled before dispatch. Interrupted or truncated responses never execute
+partial tool calls. Multiple tools from a response execute sequentially; actions
+stop once the report is finalized or the tool budget is exhausted.
+
+The 22 tool schemas in `llm_client.py` expose these operations:
+
+| Tools | Purpose |
+|---|---|
+| `check_device`, `get_device_info`, `get_wifi_status`, `toggle_wifi` | Inspect device/connectivity and recover Wi-Fi |
+| `launch_youtube`, `open_video_url`, `wait_for_ads`, `stop_video` | Launch and control playback at the configured URL |
+| `enable_stats_for_nerds`, `enable_stats_in_app_settings`, `enter_fullscreen` | Apply player setup and replay learned recipes |
+| `get_playback_status`, `get_player_state` | Monitor playback and verify setup |
+| `get_screen`, `reveal_player_controls`, `tap_element`, `press_key`, `swipe` | Inspect and navigate the device UI |
+| `save_recipe` | Save verified UI steps for reuse |
+| `collect_logs`, `retry_test`, `generate_report` | Diagnose, retry, and finish the run |
+
+The model cannot choose a different device or video URL through tool arguments;
+those values are bound locally. There is no arbitrary shell-execution tool.
+
+## Project structure
+
+```text
+ai_test_agent/
+├── agent.py              AI CLI and per-device console narration
+├── play_youtube.py       Scripted runner and grouped AI fallback
+├── llm_client.py         Tool schemas, prompt, conversation loop
+├── nim_client.py         NVIDIA transport, streaming, safe API errors
+├── validate_nim.py       Live chat/stream/tool smoke checks
+├── test_runner.py        Run state, bound registry, safety limits
+├── tools/
+│   ├── adb_tools.py      ADB device and connectivity operations
+│   ├── youtube_tools.py  uiautomator2 playback and player state
+│   ├── ui_tools.py       UI inspection, navigation, recipe storage
+│   ├── test_tools.py     Logs, retries, terminal report
+│   └── simulate.py       Fake device/app backend
+├── tests/test_nim.py     Offline protocol and simulation tests
+├── log_collector.py      logcat capture
+├── report_generator.py   Report creation, printing, persistence
+├── learned_recipes.json  Saved device-profile recipes
+├── config.py             Environment configuration
+├── requirements.txt
+├── .env.example
+└── README.md
+```
+
+Reports are written to `reports/`, and captured device logs to `logs/`. Console
+output includes tool narration and a final status per device. Exit status is zero
+when all devices pass; failures or unfinished outcomes return a nonzero status.
+Archived `.archify` exports describe the earlier architecture and are historical
+artifacts.
 
 ## Safety limits
 
-All enforced in Python, not merely requested of the model (`config.py` / `.env`):
+| Variable | Default | Enforcement |
+|---|---|---|
+| `MAX_TOOL_CALLS` | `60` | Hard cap on registry tool calls per run |
+| `MAX_RETRIES` | `2` | Hard cap on playback retries |
+| `MAX_LLM_TURNS` | `60` | Maximum inference turns in the agent loop |
+| `MAX_WAIT_SECONDS` | `180` | Default cap for direct playback-monitor calls; the agent registry uses the configured test duration plus 30 seconds |
 
-- `MAX_TOOL_CALLS` (default 25) — hard cap on tool calls per run.
-- `MAX_RETRIES` (default 2) — `retry_test` refuses once exhausted.
-- `MAX_LLM_TURNS` (default 30) — hard cap on the NVIDIA NIM model round-trips.
-- `MAX_WAIT_SECONDS` (default 180) — clamps any single monitoring call.
+These limits are enforced in Python. Stats for nerds must be verified before
+agent playback monitoring when that feature is requested. If a budget/turn limit
+or model refusal prevents completion, the CLI generates a NEEDS_HUMAN report.
+Handled inference failures also produce a NEEDS_HUMAN report with a sanitized
+error instead of provider response bodies or credentials.
 
-If a limit is hit before the model calls `generate_report` itself,
-`agent.py` force-generates a `NEEDS_HUMAN` report directly (bypassing
-another LLM call) so the run always ends cleanly.
+## Validation
 
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| `Device '<id>' was not found by adb` | Run `adb devices`; check USB debugging + authorization. Or use `--simulate`. |
-| `adb executable not found on PATH` | Install Android platform-tools and add it to `PATH`. |
-| Appium `ConnectionRefusedError` / session fails to start | Make sure `appium` is running (`appium` in a separate terminal) and `APPIUM_SERVER_URL` in `.env` matches. |
-| `Could not locate the search icon` / other locator errors | YouTube's UI changes across app versions/regions — adjust the resource-ids/accessibility-ids in `tools/appium_tools.py`. The agent still handles this gracefully (reports it as a structured error) rather than crashing. |
-| `NVIDIA_NIM_API_KEY is not set` | Copy `.env.example` to `.env` and fill in your key. |
-| Model keeps re-checking the same state | Lower `MAX_TOOL_CALLS`/`MAX_LLM_TURNS` won't fix prompting issues — check `llm_client.build_system_prompt` if you customize the flow; the bundled prompt already tells it to be efficient. |
-| Authentication failure (401/403) | Check `NVIDIA_NIM_API_KEY` and NVIDIA model access; keys from other providers do not work. |
-| Unsupported model/request (400/404/422) | Verify `NVIDIA_NIM_MODEL`, its token limit, and support for tools, streaming, and vision. |
-| Rate limit/quota (429) | Wait and retry or check your NVIDIA quota. Transient requests use bounded SDK retries. |
-| Timeout / network error | Check connectivity; adjust `NVIDIA_NIM_TIMEOUT_SECONDS` if needed. |
-| Want a different model | Set `NVIDIA_NIM_MODEL` to a supported ID from the NVIDIA API Catalog. |
-
-## NVIDIA NIM configuration and validation
-
-```ini
-NVIDIA_NIM_API_KEY=your_nvidia_nim_api_key
-NVIDIA_NIM_MODEL=your_supported_model_id
-NVIDIA_NIM_MAX_TOKENS=4096
-NVIDIA_NIM_STREAM=false
-NVIDIA_NIM_VISION=false
-NVIDIA_NIM_TIMEOUT_SECONDS=120
-```
-
-Environment variables override the `.env` next to `config.py`. Keep `.env`
-private (it is ignored by Git). Never put the key in prompts or frontend code.
-The client sends Bearer authentication rather than the previous provider's
-`x-api-key`. Existing keys must be replaced with a NVIDIA-issued key; changing
-the SDK cannot make an invalid credential valid.
-
-Set `NVIDIA_NIM_STREAM=true` for live line-by-line console narration. Complete
-streamed tool names and JSON argument fragments are assembled before dispatch;
-a truncated or interrupted response never executes partial tool calls. Normal
-responses remain the default. Tool history uses assistant `tool_calls` followed
-by matching `role=tool` messages. Device binding, recipes, reports, retries, and
-tool budgets remain enforced locally.
-
-Vision defaults off because model capabilities vary. UI element lists and
-player state remain available. With `NVIDIA_NIM_VISION=true`, JPEG screenshots
-are sent as `image_url` data URLs in a user message after all tool results;
-choose a model supporting both images and tools. Screenshot bytes stay out of
-saved history, reports, and console tool results. An unsupported feature returns
-an actionable configuration error and a `NEEDS_HUMAN` report; there is no
-silent switch to a different model or inference provider.
-
-Provider-specific thinking flags, ephemeral prompt-cache controls, beta headers,
-and server-side model fallbacks were removed. They have no universal equivalent
-in NIM's Chat Completions API. Reasoning and caching depend on the selected
-model/service. See the [NVIDIA API Catalog](https://docs.api.nvidia.com/nim/reference/llm-apis)
-for model-specific capabilities.
-
-Run offline protocol and simulated-device regression checks:
+Run offline checks without NVIDIA credentials or Android hardware:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-After configuring a real NVIDIA key and model, run the live smoke checks
-(no Android device needed; these consume NVIDIA inference quota):
+These use the real SDK with mocked HTTP transport to check authentication headers,
+normal/streaming responses, tool-call assembly and history, screenshots, safe
+errors, budget enforcement, and simulated playback/report generation.
+
+After configuring a real NVIDIA key and model, run live checks:
 
 ```bash
 python validate_nim.py
 ```
 
-This checks normal chat, streaming chat, and normal/streaming function calling
-including tool-result history. Then run the existing `agent.py --simulate`
-examples to exercise the full agent with live NVIDIA inference before using a
-real device. Archived `.archify` exports describe the pre-migration architecture
-and are historical artifacts.
+This consumes NVIDIA inference quota and checks normal chat, streaming chat, and
+normal/streaming tool calling with tool-result history. It does not access an
+Android device or validate vision. Test vision and real-device playback separately
+with a suitable model and a connected phone.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Missing `NVIDIA_NIM_API_KEY` or `NVIDIA_NIM_MODEL` | Set both in the project `.env` or environment; replace example placeholders |
+| Authentication failure (401/403) | Check your NVIDIA-issued key and access to the selected model |
+| Old `invalid x-api-key` error | Ensure you are running the migrated checkout/environment; this client uses NVIDIA Bearer authentication |
+| Unsupported model/request (400/404/422) | Verify the model ID, token budget, and support for function calling, streaming, or vision |
+| Rate limit/quota (429) | Wait before retrying or check your NVIDIA quota |
+| Timeout/network failure | Check connectivity; adjust `NVIDIA_NIM_TIMEOUT_SECONDS` if needed |
+| Truncated response | Adjust `NVIDIA_NIM_MAX_TOKENS` within the model's supported limit |
+| Model does not call tools | Select a model supporting automatic function calling; inspect the goal/prompt |
+| `adb` missing or device not found | Install Android Platform Tools, check USB debugging/authorization, and run `adb devices` |
+| UI step fails | Inspect tool results and current UI; the agent can adapt using `get_screen` and navigation tools |
+| Screenshots omitted | Enable `NVIDIA_NIM_VISION=true` only for a model supporting images and tool calling |
+
+## Diagnostic logs and this failure pattern
+
+Each scripted or AI device run prints its diagnostic log path. Logs use JSONL
+(one timestamped JSON event per line) under `logs/`; parallel devices and phases
+have separate files. Final reports link to the AI diagnostic log. A fallback run
+retains the initial scripted failure in its report's failure flag.
+
+Events include tool inputs/results, tool durations, ADB command exit codes,
+current Wi-Fi evidence, ad markers/player readiness, and the UI hierarchy at an
+ad timeout. NVIDIA events include the model, history size/roles, HTTP attempts,
+SDK retry numbers, response status, request IDs, retry-after headers, and
+sanitized provider error fields. API keys, authorization values, and screenshot
+bytes are redacted; full inference request payloads and headers are not logged.
+Device logcat is captured automatically on scripted failures and AI inference
+failures, and remains available through `collect_logs` as a separate `.log` file.
+Capture is best-effort; failures to read device logs do not replace the original error. Diagnostic JSONL files are ignored by Git.
+
+For `nvidia/nemotron-3-ultra-550b-a55b`, keep `NVIDIA_NIM_VISION=false`: the
+[NVIDIA model page](https://build.nvidia.com/nvidia/nemotron-3-ultra-550b-a55b)
+lists text input and tool calling. `NVIDIA_NIM_STREAM=true` provides live text
+narration; it does not make a persistent provider HTTP 500 disappear. The SDK
+already retries eligible failures twice. The logged provider error and request
+ID distinguish service errors from model/request processing failures; the
+console message alone cannot establish the exact cause.
+
+An ad timeout now distinguishes visible player ad markers, missing player UI,
+and unstable player state. Sponsored cards below the player do not count as
+video ad evidence. Wi-Fi checks use current Android status and return unknown
+when the association cannot be established. An accepted enable command does not
+connect the phone to a saved network or prove internet availability. A phone can
+also stream through mobile data; repeated Wi-Fi enabling is not a diagnosis.
+
+After installing requirements and confirming your key/model, first run
+`python validate_nim.py`, then repeat the original playback command. On failure,
+inspect `nim_completion_error`, `nim_http_response`, `wifi_diagnostics`, and
+`ad_timeout` in the printed files. Live provider checks require NVIDIA
+credentials; real-device verification requires an ADB-visible phone.

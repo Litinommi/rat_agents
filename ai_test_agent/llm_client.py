@@ -8,6 +8,9 @@ schema - none of which the model ever sees or controls.
 """
 
 import json
+import time
+
+from diagnostics import record
 
 from config import NVIDIA_NIM_VISION, MAX_LLM_TURNS, MAX_RETRIES, MAX_TOOL_CALLS
 from nim_client import create_client, chat_completion
@@ -266,6 +269,10 @@ a reason to give up.
 
 Flow:
 1. check_device, get_device_info (note manufacturer, YouTube version, locale), get_wifi_status.
+   Wi-Fi association is not internet availability: the phone may use mobile data. connected=null means unknown.
+   toggle_wifi only accepts an enable/disable command; it does not choose a network or prove connectivity.
+   Do not repeatedly enable already-enabled Wi-Fi. After one unsuccessful enable/check, inspect get_screen,
+   playback state and collect_logs; diagnose or report NEEDS_HUMAN if manual network selection is required.
 2. launch_youtube -> open_video_url -> wait_for_ads.
 3. Player setup: enable_stats_for_nerds (if required) BEFORE enter_fullscreen (if required) - the menu is easier \
 to reach in portrait.
@@ -355,7 +362,11 @@ def _run_agent_loop(client, goal, state, dispatch, on_assistant_text, on_tool_ca
                     result = {"error": "Run has ended; this tool was not executed."}
                 else:
                     on_tool_call(name, arguments)
+                    started = time.monotonic()
+                    record("agent_tool_started", tool=name, tool_call_id=call["id"])
                     result = dispatch(name, arguments)
+                    record("agent_tool_completed", tool=name, tool_call_id=call["id"],
+                           duration_seconds=round(time.monotonic() - started, 3))
             except ToolBudgetExceeded as exc:
                 result = {"error": str(exc)}
                 budget_exceeded = True

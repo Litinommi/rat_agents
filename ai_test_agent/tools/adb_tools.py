@@ -8,8 +8,10 @@ boolean `enabled` for toggle_wifi); it never supplies raw shell text.
 
 import re
 import subprocess
+import time
 
 from config import ADB_TIMEOUT_SECONDS
+from diagnostics import record
 from tools.simulate import SimulatedState
 
 
@@ -18,8 +20,9 @@ class AdbError(Exception):
 
 
 def _run_adb(args: list[str], timeout: int = ADB_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
+    started = time.monotonic()
     try:
-        return subprocess.run(
+        result = subprocess.run(
             ["adb", *args],
             capture_output=True,
             text=True,
@@ -30,9 +33,15 @@ def _run_adb(args: list[str], timeout: int = ADB_TIMEOUT_SECONDS) -> subprocess.
             timeout=timeout,
             check=False,
         )
+        record("adb_result", arguments=args, exit_code=result.returncode,
+               duration_seconds=round(time.monotonic() - started, 3), stderr=result.stderr,
+               stdout_chars=len(result.stdout))
+        return result
     except FileNotFoundError as exc:
+        record("adb_error", arguments=args, error="adb not found")
         raise AdbError("adb executable not found on PATH. Install Android platform-tools.") from exc
     except subprocess.TimeoutExpired as exc:
+        record("adb_error", arguments=args, error="command timed out", timeout_seconds=timeout)
         raise AdbError(f"adb command timed out after {timeout}s: {' '.join(args)}") from exc
 
 
@@ -141,20 +150,52 @@ def get_wifi_status(device_id: str, sim: SimulatedState | None = None) -> dict:
     if sim is not None:
         return {"wifi_enabled": True, "connected": sim.wifi_connected}
 
-    enabled_result = _run_adb(["-s", device_id, "shell", "settings", "get", "global", "wifi_on"])
-    wifi_enabled = enabled_result.stdout.strip() == "1"
+    try:
+        enabled_result = _run_adb(["-s", device_id, "shell", "settings", "get", "global", "wifi_on"])
+        enabled_value = enabled_result.stdout.strip()
+        wifi_enabled = enabled_value == "1" if enabled_result.returncode == 0 and enabled_value in {"0", "1"} else None
+        status = _run_adb(["-s", device_id, "shell", "cmd", "wifi", "status"])
+        dump = _run_adb(["-s", device_id, "shell", "dumpsys", "wifi"], timeout=ADB_TIMEOUT_SECONDS)
+    except AdbError as exc:
+        return {"wifi_enabled": None, "connected": None, "error": str(exc)}
+    record("wifi_diagnostics", settings_value=enabled_value, status_exit=status.returncode,
+           status_output=status.stdout, dump_exit=dump.returncode,
+           # Avoid dumping historical connection events/SSID lists into the model context.
+           current_info=[line.strip() for line in dump.stdout.splitlines()
+                         if re.match(r"\s*(?:mWifiInfo|WifiInfo|mNetworkInfo|NetworkInfo|Wi-Fi is|Wifi is)", line)])
+    result = _parse_wifi_status(status.stdout if status.returncode == 0 else "", dump.stdout if dump.returncode == 0 else "", wifi_enabled)
+    if result["connected"] is False and result["wifi_enabled"]:
+        result["hint"] = "Wi-Fi is already enabled but not associated. Enabling it again will not select a network. Inspect playback/connectivity; mobile data may be in use."
+    elif result["connected"] is None:
+        result["hint"] = "Wi-Fi association could not be determined from this device's output. Do not assume loss of internet; verify playback or inspect the screen."
+    return result
 
-    dump = _run_adb(["-s", device_id, "shell", "dumpsys", "wifi"], timeout=ADB_TIMEOUT_SECONDS)
-    if dump.returncode != 0:
-        return {"wifi_enabled": wifi_enabled, "connected": False, "error": dump.stderr.strip()}
 
-    output = dump.stdout
-    connected = "mNetworkInfo" in output and "CONNECTED/CONNECTED" in output.replace(" ", "")
-    if not connected:
-        # Fallback heuristic for OEM dumpsys formats that omit mNetworkInfo.
-        connected = "Wi-Fi is connected" in output or ("state: CONNECTED" in output)
-
-    return {"wifi_enabled": wifi_enabled, "connected": connected}
+def _parse_wifi_status(status: str, dump: str, wifi_enabled: bool | None) -> dict:
+    """Use current Android status, never historical CONNECTED events in dumpsys."""
+    enabled_match = re.search(r"(?:Wi-?Fi|Wifi) is (enabled|disabled)", status, re.I)
+    if enabled_match:
+        wifi_enabled = enabled_match.group(1).lower() == "enabled"
+    if re.search(r"(?:Wi-?Fi|Wifi) is (?:not connected|disconnected)", status, re.I):
+        return {"wifi_enabled": wifi_enabled, "connected": False, "source": "cmd wifi status"}
+    if re.search(r"(?:Wi-?Fi|Wifi) is connected(?:\s|$)", status, re.I):
+        return {"wifi_enabled": wifi_enabled, "connected": True, "source": "cmd wifi status"}
+    current = "\n".join(line for line in (status + "\n" + dump).splitlines()
+                        if re.match(r"\s*(?:mWifiInfo|WifiInfo|mNetworkInfo|NetworkInfo|Wi-Fi is|Wifi is)", line))
+    disconnected = re.search(r"(?:state|Supplicant state)\s*[:=]\s*(?:DISCONNECTED|INACTIVE|UNINITIALIZED)\b", current, re.I)
+    connected = re.search(r"(?:state|detailed state)\s*[:=]\s*CONNECTED\b", current, re.I)
+    completed = re.search(r"Supplicant state\s*[:=]\s*COMPLETED\b", current, re.I)
+    valid_ip = re.search(r"IP(?: address)?\s*[:=]\s*/?(?!0\.0\.0\.0)(?:\d{1,3}\.){3}\d{1,3}", current, re.I)
+    if disconnected:
+        association = False
+    elif connected or (completed and valid_ip) or re.search(r"Wi-Fi is connected", current, re.I):
+        association = True
+    elif wifi_enabled is False:
+        association = False
+    else:
+        association = None
+    return {"wifi_enabled": wifi_enabled, "connected": association,
+            "source": "dumpsys wifi" if association is not None else "unknown"}
 
 
 def toggle_wifi(device_id: str, enabled: bool, sim: SimulatedState | None = None) -> dict:
@@ -165,10 +206,11 @@ def toggle_wifi(device_id: str, enabled: bool, sim: SimulatedState | None = None
     """
     if sim is not None:
         sim.wifi_connected = enabled
-        return {"success": True, "wifi_enabled": enabled}
+        return {"success": True, "wifi_enabled": enabled, "connected": enabled}
 
     verb = "enable" if enabled else "disable"
     result = _run_adb(["-s", device_id, "shell", "svc", "wifi", verb])
     if result.returncode != 0:
         return {"success": False, "error": result.stderr.strip() or "svc wifi command failed"}
-    return {"success": True, "wifi_enabled": enabled}
+    return {"success": True, "command_accepted": True, "requested_enabled": enabled,
+            "hint": "Enable/disable command accepted; this does not confirm network association. Re-check status."}
