@@ -22,7 +22,9 @@ REPORT_DIR.mkdir(exist_ok=True)
 NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY", "").strip()
 NVIDIA_NIM_MODEL = os.getenv("NVIDIA_NIM_MODEL", "").strip()
-NVIDIA_NIM_MAX_TOKENS = int(os.getenv("NVIDIA_NIM_MAX_TOKENS", "4096"))
+NVIDIA_NIM_MAX_TOKENS = int(os.getenv("NVIDIA_NIM_MAX_TOKENS", "32768"))
+NVIDIA_NIM_TEMPERATURE = float(os.getenv("NVIDIA_NIM_TEMPERATURE", "1.0"))
+NVIDIA_NIM_TOP_P = float(os.getenv("NVIDIA_NIM_TOP_P", "0.95"))
 NVIDIA_NIM_STREAM = os.getenv("NVIDIA_NIM_STREAM", "false").lower() == "true"
 # Enable only for a model supporting images AND function calling.
 NVIDIA_NIM_VISION = os.getenv("NVIDIA_NIM_VISION", "false").lower() == "true"
@@ -36,6 +38,8 @@ def nim_configuration_error() -> str | None:
         return "NVIDIA_NIM_MODEL is not set. Choose a supported NVIDIA NIM model in .env."
     if NVIDIA_NIM_MAX_TOKENS <= 0 or NVIDIA_NIM_TIMEOUT_SECONDS <= 0:
         return "NVIDIA_NIM_MAX_TOKENS and NVIDIA_NIM_TIMEOUT_SECONDS must be positive."
+    if not 0 < NVIDIA_NIM_TEMPERATURE <= 1 or not 0 < NVIDIA_NIM_TOP_P <= 1:
+        return "NVIDIA_NIM_TEMPERATURE and NVIDIA_NIM_TOP_P must be between 0 and 1."
     return None
 
 
@@ -56,8 +60,8 @@ PLAYBACK_POLL_INTERVAL_SECONDS = int(os.getenv("PLAYBACK_POLL_INTERVAL_SECONDS",
 # --- Safety limits ------------------------------------------------------
 # These are enforced in Python regardless of what the LLM decides to do -
 # the model can *reason* about retries, but it cannot exceed these caps.
-MAX_TOOL_CALLS = int(os.getenv("MAX_TOOL_CALLS", "60"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
+MAX_FIXES_PER_DEVICE = int(os.getenv("MAX_FIXES_PER_DEVICE", "3"))
+FIX_MAX_TOOL_CALLS = int(os.getenv("FIX_MAX_TOOL_CALLS", "25"))
 MAX_WAIT_SECONDS = int(os.getenv("MAX_WAIT_SECONDS", "180"))
 MAX_LLM_TURNS = int(os.getenv("MAX_LLM_TURNS", "60"))
 

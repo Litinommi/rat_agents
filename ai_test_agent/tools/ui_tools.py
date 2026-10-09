@@ -48,6 +48,7 @@ _KEYCODES = {"back": 4, "home": 3, "enter": 66, "space": 62, "media_play_pause":
 _RECIPE_STEP_TIMEOUT_SECONDS = 5
 
 _LAST_SCREEN: dict[str, list[dict]] = {}
+_RECIPE_FAILURES: dict[tuple[str, str], dict[str, dict]] = {}
 _PROFILE_CACHE: dict[str, str] = {}
 _recipes_lock = threading.Lock()
 
@@ -207,7 +208,7 @@ def _yt_and_locale(profile_key: str) -> tuple[str, str]:
     return _yt_and_language(profile_key)
 
 
-def candidate_recipes(device_id: str, task: str) -> list[tuple[str, list[dict]]]:
+def candidate_recipes(device_id: str, task: str, include_skipped: bool = False) -> list[tuple[str, list[dict]]]:
     """Every saved recipe for `task`, best match first. All are worth trying
     before failing / calling the AI - each replay is verified, and taps that
     leave YouTube are undone:
@@ -231,8 +232,41 @@ def candidate_recipes(device_id: str, task: str) -> list[tuple[str, list[dict]]]
             return 2
         return 3
 
-    found = [(key, tasks[task]) for key, tasks in recipes.items() if tasks.get(task)]
+    found = [
+        (key, tasks[task]) for key, tasks in recipes.items()
+        if tasks.get(task) and (include_skipped
+                                or tasks.get("_recipe_stats", {}).get(task, {}).get("consecutive_failures", 0) < 2)
+    ]
     return sorted(found, key=lambda item: rank(item[0]))  # stable: keeps file order within a rank
+
+
+def _record_recipe_result(source: str, task: str, passed: bool) -> None:
+    with _recipes_lock:
+        recipes = _load_recipes()
+        if source not in recipes:
+            return
+        stats = recipes[source].setdefault("_recipe_stats", {}).setdefault(
+            task, {"passes": 0, "failures": 0, "consecutive_failures": 0})
+        key = "passes" if passed else "failures"
+        stats[key] = stats.get(key, 0) + 1
+        stats["consecutive_failures"] = 0 if passed else stats.get("consecutive_failures", 0) + 1
+        RECIPES_FILE.write_text(json.dumps(recipes, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def recipe_failures(device_id: str, task: str) -> dict[str, dict]:
+    return dict(_RECIPE_FAILURES.get((device_id, task), {}))
+
+
+def recipe_context(device_id: str, task: str, limit: int = 3) -> list[dict]:
+    with _recipes_lock:
+        recipes = _load_recipes()
+    failures = recipe_failures(device_id, task)
+    result = []
+    for source, steps in candidate_recipes(device_id, task, include_skipped=True)[:limit]:
+        result.append({"profile": source, "steps": steps,
+                       "notes": recipes.get(source, {}).get("_notes", {}).get(task, ""),
+                       "last_failure": failures.get(source)})
+    return result
 
 
 def try_recipes(device_id: str, task: str, verify) -> dict | None:
@@ -247,12 +281,17 @@ def try_recipes(device_id: str, task: str, verify) -> dict | None:
     for source, steps in candidate_recipes(device_id, task):
         try:
             result = _run_steps(device_id, steps)
-        except Exception:  # noqa: BLE001 - a broken recipe must never block the fallbacks
-            continue
+        except Exception as exc:  # noqa: BLE001 - a broken recipe must never block the fallbacks
+            result = {"success": False, "error": str(exc)}
         if result.get("success") and verify():
+            _record_recipe_result(source, task, True)
+            _RECIPE_FAILURES.get((device_id, task), {}).pop(source, None)
             if source != own:
                 save_recipe(device_id, task, steps, notes=f"reused from {source}")
             return {**result, "recipe_from": source}
+        _record_recipe_result(source, task, False)
+        _RECIPE_FAILURES.setdefault((device_id, task), {})[source] = {
+            "failed_step": result.get("failed_step"), "error": result.get("error", "verification failed")}
         if result.get("taps_done"):
             # It got partway (e.g. opened a menu) - close it before the next attempt.
             _driver(device_id).press("back")
@@ -280,13 +319,15 @@ def _run_steps(device_id: str, steps: list[dict]) -> dict:
                 time.sleep(0.5)
             result = switch_on(driver, step.get("match", {}))
             if not result["success"]:
-                return {**result, "taps_done": taps, "error": f"Recipe step {i}: {result['error']}"}
+                return {**result, "taps_done": taps, "failed_step": i,
+                        "error": f"Recipe step {i}: {result['error']}"}
             taps += int(result["changed"])
         elif action == "tap":
             match = step.get("match", {})
             selector = _selector_for(match)
             if selector is None:
-                return {"success": False, "taps_done": taps, "error": f"Recipe step {i} has no usable match"}
+                return {"success": False, "taps_done": taps, "failed_step": i,
+                        "error": f"Recipe step {i} has no usable match"}
             element = None
             if step.get("reveal_player_controls"):
                 yt._reveal_and_find(driver, selector)
@@ -298,16 +339,18 @@ def _run_steps(device_id: str, steps: list[dict]) -> dict:
                     if element is None:
                         time.sleep(0.5)
             if element is None or not yt._tap(element):
-                return {"success": False, "taps_done": taps, "error": f"Recipe step {i} target not found: {match}"}
+                return {"success": False, "taps_done": taps, "failed_step": i,
+                        "error": f"Recipe step {i} target not found: {match}"}
             taps += 1
             time.sleep(float(step.get("wait_after", 1)))
             other = _left_youtube(driver)
             if other:
                 driver.press("back")
-                return {"success": False, "taps_done": 0,  # already pressed back
+                return {"success": False, "taps_done": 0, "failed_step": i,  # already pressed back
                         "error": f"Recipe step {i} opened another app ({other}); pressed back"}
         else:
-            return {"success": False, "taps_done": taps, "error": f"Recipe step {i} has unknown action '{action}'"}
+            return {"success": False, "taps_done": taps, "failed_step": i,
+                    "error": f"Recipe step {i} has unknown action '{action}'"}
     return {"success": True, "via": "learned_recipe", "steps": len(steps)}
 
 
@@ -331,7 +374,7 @@ def get_screen(device_id: str, include_screenshot: bool = True) -> dict:
             text, desc = a.get("text", ""), a.get("content-desc", "")
             rid = a.get("resource-id", "")
             clickable = a.get("clickable") == "true"
-            if not (text or desc or (rid and clickable)):
+            if not (text or desc or (rid and clickable) or a.get("checkable") == "true"):
                 continue
             elements.append(
                 {
@@ -344,6 +387,10 @@ def get_screen(device_id: str, include_screenshot: bool = True) -> dict:
                     "_raw_text": text,
                     "_raw_desc": desc,
                     "clickable": clickable,
+                    "checkable": a.get("checkable") == "true",
+                    "checked": a.get("checked") == "true",
+                    "switch": ("on" if a.get("checked") == "true" else "off")
+                    if a.get("checkable") == "true" else "",
                     "bounds": a.get("bounds"),
                 }
             )
@@ -385,6 +432,35 @@ def tap_element(device_id: str, index: int, reveal_player_controls_first: bool =
     try:
         yt = _yt()
         driver = _driver(device_id)
+        switch = None
+        switch_match = None
+        bounds = _parse_bounds(element["bounds"])
+        for candidate in screen:
+            candidate_bounds = _parse_bounds(candidate["bounds"])
+            if not candidate.get("checkable") or not candidate_bounds:
+                continue
+            same_row = bounds and not (candidate_bounds[3] < bounds[1] - _SWITCH_ROW_SLACK_PX
+                                       or candidate_bounds[1] > bounds[3] + _SWITCH_ROW_SLACK_PX)
+            if candidate is element or same_row:
+                switches = driver(checkable=True)
+                switch = None
+                for i in range(switches.count):
+                    info = switches[i].info
+                    if info.get("bounds") == {"left": candidate_bounds[0], "top": candidate_bounds[1],
+                                              "right": candidate_bounds[2], "bottom": candidate_bounds[3]}:
+                        switch = switches[i]
+                        break
+                if switch is None:
+                    continue
+                label = element if not element.get("checkable") else next(
+                    (e for e in screen if e is not element and (e.get("_raw_text") or e.get("_raw_desc"))
+                     and _parse_bounds(e["bounds"]) and not (_parse_bounds(e["bounds"])[3] < bounds[1] - _SWITCH_ROW_SLACK_PX
+                     or _parse_bounds(e["bounds"])[1] > bounds[3] + _SWITCH_ROW_SLACK_PX)), element)
+                switch_match = _stable_match(label, screen)
+                if switch.info.get("checked"):
+                    return {"success": True, "already_on": True,
+                            "recipe_step": {"action": "switch_on", "match": switch_match}}
+                break
         if reveal_player_controls_first:
             selector = _selector_for(match)
             if selector:
@@ -402,6 +478,8 @@ def tap_element(device_id: str, index: int, reveal_player_controls_first: bool =
             # Ready-to-save recipe step - copy into save_recipe once the task is verified.
             "recipe_step": {"action": "tap", "match": match, "reveal_player_controls": reveal_player_controls_first},
         }
+        if switch is not None:
+            result["recipe_step"] = {"action": "switch_on", "match": switch_match}
         other = _left_youtube(driver)
         if other:
             result["warning"] = f"This tap opened another app ({other}). Press back to return to YouTube; don't save this step."
@@ -434,10 +512,12 @@ def swipe(device_id: str, direction: str) -> dict:
         return {"success": False, "error": str(exc)}
 
 
-def save_recipe(device_id: str, task: str, steps: list[dict], notes: str = "") -> dict:
+def save_recipe(device_id: str, task: str, steps: list[dict], notes: str) -> dict:
     """Persist verified steps for `task` on this device profile."""
     if task not in RECIPE_TASKS:
         return {"success": False, "error": f"task must be one of: {', '.join(RECIPE_TASKS)}"}
+    if not notes.strip():
+        return {"success": False, "error": "notes is required (cause, and what differed on this phone)"}
     for i, step in enumerate(steps):
         if step.get("action") not in _RECIPE_ACTIONS:
             return {"success": False, "error": f"Step {i}: action must be one of {sorted(_RECIPE_ACTIONS)}"}
@@ -452,5 +532,7 @@ def save_recipe(device_id: str, task: str, steps: list[dict], notes: str = "") -
         recipes = _load_recipes()
         recipes.setdefault(key, {})[task] = steps
         recipes[key].setdefault("_notes", {})[task] = notes
+        recipes[key].setdefault("_recipe_stats", {})[task] = {
+            "passes": 0, "failures": 0, "consecutive_failures": 0}
         RECIPES_FILE.write_text(json.dumps(recipes, indent=2, ensure_ascii=False), encoding="utf-8")
     return {"success": True, "device_profile": key, "task": task, "steps_saved": len(steps), "file": str(RECIPES_FILE)}

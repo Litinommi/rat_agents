@@ -165,9 +165,9 @@ def get_wifi_status(device_id: str, sim: SimulatedState | None = None) -> dict:
                          if re.match(r"\s*(?:mWifiInfo|WifiInfo|mNetworkInfo|NetworkInfo|Wi-Fi is|Wifi is)", line)])
     result = _parse_wifi_status(status.stdout if status.returncode == 0 else "", dump.stdout if dump.returncode == 0 else "", wifi_enabled)
     if result["connected"] is False and result["wifi_enabled"]:
-        result["hint"] = "Wi-Fi is already enabled but not associated. Enabling it again will not select a network. Inspect playback/connectivity; mobile data may be in use."
+        result["hint"] = "Wi-Fi is already enabled but not associated; enabling it again will not select a network. Mobile data may still provide internet."
     elif result["connected"] is None:
-        result["hint"] = "Wi-Fi association could not be determined from this device's output. Do not assume loss of internet; verify playback or inspect the screen."
+        result["hint"] = "Wi-Fi association is unknown; this does not establish internet loss."
     return result
 
 
@@ -213,4 +213,4 @@ def toggle_wifi(device_id: str, enabled: bool, sim: SimulatedState | None = None
     if result.returncode != 0:
         return {"success": False, "error": result.stderr.strip() or "svc wifi command failed"}
     return {"success": True, "command_accepted": True, "requested_enabled": enabled,
-            "hint": "Enable/disable command accepted; this does not confirm network association. Re-check status."}
+            "hint": "Enable/disable command accepted; network association remains unverified."}

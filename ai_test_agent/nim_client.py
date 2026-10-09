@@ -1,17 +1,23 @@
 """NVIDIA-only transport, safe API errors, and streamed tool-call assembly."""
+import json
 import time
 import uuid
-import json
-import httpx
-from openai import OpenAI, APIConnectionError, APIStatusError, APITimeoutError
 
-from diagnostics import record, record_exception, sanitize
+import httpx
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 from config import (
-    NVIDIA_NIM_API_KEY, NVIDIA_NIM_BASE_URL, NVIDIA_NIM_MODEL,
-    NVIDIA_NIM_MAX_TOKENS, NVIDIA_NIM_STREAM, NVIDIA_NIM_TIMEOUT_SECONDS,
+    NVIDIA_NIM_API_KEY,
+    NVIDIA_NIM_BASE_URL,
+    NVIDIA_NIM_MAX_TOKENS,
+    NVIDIA_NIM_MODEL,
+    NVIDIA_NIM_STREAM,
+    NVIDIA_NIM_TEMPERATURE,
+    NVIDIA_NIM_TIMEOUT_SECONDS,
+    NVIDIA_NIM_TOP_P,
     nim_configuration_error,
 )
+from diagnostics import record, record_exception, sanitize
 
 
 class NIMError(RuntimeError):
@@ -56,17 +62,21 @@ def create_client():
     )
 
 
-def chat_completion(client, messages, *, tools=None, stream=None, on_text=lambda text: None):
+def chat_completion(client, messages, *, tools=None, tool_choice="auto", stream=None,
+                    on_text=lambda text: None, usage=None):
     """Return a normalized assistant message after fully receiving the response.
 
     Tool arguments are never dispatched until the stream has ended successfully.
     Text callbacks receive whole lines, preserving the CLI's existing narration.
     """
     streaming = NVIDIA_NIM_STREAM if stream is None else stream
-    options = dict(model=NVIDIA_NIM_MODEL, messages=messages,
-                   max_tokens=NVIDIA_NIM_MAX_TOKENS, stream=streaming)
+    options = {"model": NVIDIA_NIM_MODEL, "messages": messages,
+               "temperature": NVIDIA_NIM_TEMPERATURE, "top_p": NVIDIA_NIM_TOP_P,
+               "max_tokens": NVIDIA_NIM_MAX_TOKENS, "stream": streaming}
+    if streaming:
+        options["stream_options"] = {"include_usage": True}
     if tools:
-        options.update(tools=tools, tool_choice="auto")
+        options.update(tools=tools, tool_choice=tool_choice)
     completion_id = uuid.uuid4().hex[:12]
     started = time.monotonic()
     record("nim_completion_started", completion_id=completion_id, model=NVIDIA_NIM_MODEL,
@@ -84,10 +94,15 @@ def chat_completion(client, messages, *, tools=None, stream=None, on_text=lambda
             calls = [call.model_dump(exclude_none=True) for call in message.tool_calls or []]
             refused = bool(getattr(message, "refusal", None))
             finish = choice.finish_reason
+            reasoning = getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None)
+            response_usage = getattr(response, "usage", None)
         else:
-            content, pending, calls_by_index, refused, finish = "", "", {}, False, None
+            content, reasoning, pending, calls_by_index, refused, finish = "", "", "", {}, False, None
+            response_usage = None
             try:
                 for chunk in response:
+                    if getattr(chunk, "usage", None):
+                        response_usage = chunk.usage
                     if not chunk.choices:
                         continue  # e.g. usage-only events
                     choice = chunk.choices[0]
@@ -101,6 +116,8 @@ def chat_completion(client, messages, *, tools=None, stream=None, on_text=lambda
                             line, pending = pending.split("\n", 1)
                             if line.strip():
                                 on_text(line)
+                    reasoning += (getattr(delta, "reasoning_content", None)
+                                  or getattr(delta, "reasoning", None) or "")
                     for part in delta.tool_calls or []:
                         call = calls_by_index.setdefault(part.index, {
                             "id": "", "type": "function", "function": {"name": "", "arguments": ""},
@@ -119,7 +136,11 @@ def chat_completion(client, messages, *, tools=None, stream=None, on_text=lambda
                 raise NIMError("NVIDIA NIM stream ended before completion. No tool calls were executed.")
         record("nim_completion_received", completion_id=completion_id, finish_reason=finish,
                duration_seconds=round(time.monotonic() - started, 3),
-               tool_names=[call["function"].get("name") for call in calls], text_chars=len(content))
+               tool_names=[call["function"].get("name") for call in calls], text_chars=len(content),
+               usage=response_usage.model_dump() if response_usage else None)
+        if usage is not None and response_usage:
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                usage[key] = usage.get(key, 0) + (getattr(response_usage, key, 0) or 0)
         if finish == "length":
             raise NIMError("NVIDIA NIM response was truncated. Adjust NVIDIA_NIM_MAX_TOKENS within the model's limit.")
         if refused or finish == "content_filter":
@@ -130,6 +151,8 @@ def chat_completion(client, messages, *, tools=None, stream=None, on_text=lambda
         if not streaming and content.strip():
             on_text(content.strip())
         message = {"role": "assistant", "content": content or None}
+        if reasoning:
+            message["reasoning_content"] = reasoning
         if calls:
             message["tool_calls"] = calls
         return message, False

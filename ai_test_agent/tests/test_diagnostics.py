@@ -112,20 +112,21 @@ class DiagnosticTests(unittest.TestCase):
             self.assertNotIn('nvapi-private', text)
             self.assertNotIn('authorization', text)
 
-    def test_fallback_report_retains_scripted_failure(self):
-        import agent
-        args = SimpleNamespace(goal="test", video_url="https://youtu.be/test", stats_for_nerds=True,
-                               fullscreen=True, simulate=True, inject_failure=False, sim_unfamiliar_ui=False,
-                               initial_failure="wait_for_ads: timeout")
-        results = {}
+    def test_repair_failure_report_retains_root_cause(self):
+        import play_youtube
+        args = SimpleNamespace(stats_for_nerds=True, fullscreen=True, keep_playing=True, ai_fallback=True,
+                               simulate=True, inject_failure=False, sim_unfamiliar_ui=False,
+                               sim_stats_setting_off=True)
         with tempfile.TemporaryDirectory() as directory, patch.object(diagnostics, "LOG_DIR", Path(directory)), \
-             patch.object(agent, "run_agent_loop", side_effect=nim_client.NIMError("NIM HTTP 500")), \
-             patch.object(agent.report_generator, "save_report", return_value="report.json"), \
-             patch.object(agent.report_generator, "print_report") as printed, patch("builtins.print"):
-            agent.run_device("fake", args, 5, False, results)
-            report = printed.call_args.args[0]
+             patch.object(play_youtube, "fix_step", return_value={"fixed": False, "summary": "NIM HTTP 500",
+                                                                   "needs_human": True}), \
+             patch.object(play_youtube.report_generator, "save_report", return_value="report.json"), \
+             patch("builtins.print"):
+            with diagnostics.diagnostic_run("fake", "test"):
+                report = play_youtube.run_phone("fake", "https://youtu.be/test", 5, args)
             self.assertTrue(report["failure_observed"])
-            self.assertEqual(report["initial_failure"], "wait_for_ads: timeout")
+            self.assertIn("stats", report["root_cause"])
+            self.assertEqual(report["status"], "NEEDS_HUMAN")
             self.assertTrue(Path(report["diagnostic_log"]).exists())
 
     def test_logcat_nonzero_is_a_failure_and_redacts_credentials(self):

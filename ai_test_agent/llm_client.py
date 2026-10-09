@@ -1,390 +1,174 @@
-"""NVIDIA NIM tool-use wiring: the tool schemas NVIDIA NIM is allowed to call, the
-system prompt that frames the loop, and the manual agentic loop itself.
-
-This is a manual `while` loop so agent.py
-gets full control over per-call console narration, the hard MAX_TOOL_CALLS
-/ MAX_RETRIES safety valves, and injecting device_id / video URL outside the
-schema - none of which the model ever sees or controls.
-"""
+"""Step-scoped NIM repair loop and its constrained tool schemas."""
 
 import json
 import time
 
+from config import MAX_LLM_TURNS, NVIDIA_NIM_VISION
 from diagnostics import record
-
-from config import NVIDIA_NIM_VISION, MAX_LLM_TURNS, MAX_RETRIES, MAX_TOOL_CALLS
-from nim_client import create_client, chat_completion
+from nim_client import chat_completion, create_client
 from test_runner import ToolBudgetExceeded
 from tools.ui_tools import RECIPE_TASKS
 
 _NO_INPUT = {"type": "object", "properties": {}, "required": []}
 
+
+def _schema(name, description, properties=None, required=None):
+    return {"type": "function", "function": {"name": name, "description": description,
+            "parameters": {"type": "object", "properties": properties or {}, "required": required or []}}}
+
+
 TOOL_SCHEMAS = [
-    # --- environment ---------------------------------------------------------
-    {
-        "name": "check_device",
-        "description": "Check whether the target Android device is connected and responsive via ADB. Always call this first.",
-        "parameters": _NO_INPUT,
-    },
-    {
-        "name": "get_device_info",
-        "description": "Get manufacturer, model, Android version, YouTube app version, system locale and screen size. "
-        "These decide which UI YouTube shows, so call this early - it tells you whether to expect a non-English UI.",
-        "parameters": _NO_INPUT,
-    },
-    {
-        "name": "get_wifi_status",
-        "description": "Check whether Wi-Fi is enabled and connected on the device via ADB.",
-        "parameters": _NO_INPUT,
-    },
-    {
-        "name": "toggle_wifi",
-        "description": "Enable or disable Wi-Fi on the device via ADB (`svc wifi`). Use this as a recovery action when you diagnose a connectivity problem.",
-        "parameters": {
-            "type": "object",
-            "properties": {"enabled": {"type": "boolean", "description": "True to enable Wi-Fi, false to disable it."}},
-            "required": ["enabled"],
-        },
-    },
-    # --- built-in (fast) playback steps --------------------------------------
-    {
-        "name": "launch_youtube",
-        "description": "Connect to the phone and (re)launch the YouTube app fresh on its home screen.",
-        "parameters": _NO_INPUT,
-    },
-    {
-        "name": "open_video_url",
-        "description": "Open the test's video URL directly in the YouTube app (deep link). The URL is fixed by the test configuration.",
-        "parameters": _NO_INPUT,
-    },
-    {
-        "name": "wait_for_ads",
-        "description": "Tap 'Skip' on ads when offered, otherwise wait until pre-roll ads finish. Call after open_video_url and before player actions.",
-        "parameters": _NO_INPUT,
-    },
-    {
-        "name": "enable_stats_for_nerds",
-        "description": "Built-in step to turn on the 'Stats for nerds' overlay. Tries a learned recipe for this device first, "
-        "then English-UI locators. If it fails, do the step yourself with the UI tools (see system prompt).",
-        "parameters": _NO_INPUT,
-    },
-    {
-        "name": "enable_stats_in_app_settings",
-        "description": "Replay a SAVED RECIPE that turns on YouTube's app setting 'Enable stats for nerds'. On some "
-        "phones 'Stats for nerds' only appears in the player's More menu once this setting is on. There is no "
-        "built-in path: if no recipe exists for this phone it fails, and you must do it yourself (get_screen / "
-        "tap_element, typically You -> Settings -> General -> 'Enable stats for nerds'), verify the switch is on, "
-        "and save_recipe('enable_stats_in_settings', steps) using a switch_on step for the toggle. Afterwards call "
-        "open_video_url and wait_for_ads, then enable_stats_for_nerds again.",
-        "parameters": _NO_INPUT,
-    },
-    {
-        "name": "enter_fullscreen",
-        "description": "Built-in step to put the player in full screen. Tries a learned recipe for this device first, then the "
-        "standard fullscreen button. If it fails, do the step yourself with the UI tools.",
-        "parameters": _NO_INPUT,
-    },
-    {
-        "name": "stop_video",
-        "description": "Press Back once (exits full screen, or leaves the player).",
-        "parameters": _NO_INPUT,
-    },
-    {
-        "name": "get_playback_status",
-        "description": "Monitor playback for the given number of seconds (up to the full test duration in one call). Returns early "
-        "if an error is detected. Reports playing, error_detected, error_message and media_state.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "duration_seconds": {"type": "integer", "description": "How many seconds to monitor playback for."}
-            },
-            "required": ["duration_seconds"],
-        },
-    },
-    # --- generic UI tools: how you adapt to unfamiliar devices ----------------
-    {
-        "name": "get_player_state",
-        "description": "Language-independent verification: fullscreen (player geometry), stats_for_nerds_visible, ad_showing, "
-        "orientation, media_state. Use it to verify any step - especially ones you performed manually.",
-        "parameters": _NO_INPUT,
-    },
-    {
-        "name": "get_screen",
-        "description": "See the current screen: a numbered list of UI elements (class, resource_id, text, desc, clickable, "
-        "bounds) plus a screenshot. Labels may be in any language - use the screenshot and icons/positions to understand them.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "include_screenshot": {
-                    "type": "boolean",
-                    "description": "Attach a screenshot (default true). Set false for a cheaper element-list-only look.",
-                }
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "reveal_player_controls",
-        "description": "Tap the video player once so its auto-hiding controls (settings, fullscreen, play/pause) appear for ~3s.",
-        "parameters": _NO_INPUT,
-    },
-    {
-        "name": "tap_element",
-        "description": "Tap element number `index` from the most recent get_screen. Player controls auto-hide within ~3s, so "
-        "for a player button set reveal_player_controls_first=true (taps the player, re-finds the button, taps it). "
-        "Each successful tap returns a ready-made recipe_step.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "index": {"type": "integer", "description": "Element number from the last get_screen."},
-                "reveal_player_controls_first": {"type": "boolean", "description": "Use for buttons inside the video player."},
-            },
-            "required": ["index"],
-        },
-    },
-    {
-        "name": "press_key",
-        "description": "Press a hardware/system key.",
-        "parameters": {
-            "type": "object",
-            "properties": {"key": {"type": "string", "enum": ["back", "home", "enter", "space", "media_play_pause", "escape"]}},
-            "required": ["key"],
-        },
-    },
-    {
-        "name": "swipe",
-        "description": "Swipe the screen to scroll; 'up' reveals content further down (e.g. more menu items).",
-        "parameters": {
-            "type": "object",
-            "properties": {"direction": {"type": "string", "enum": ["up", "down", "left", "right"]}},
-            "required": ["direction"],
-        },
-    },
-    {
-        "name": "save_recipe",
-        "description": "After you completed a step manually AND verified it with get_player_state, save the steps so the built-in "
-        "tool replays them automatically on this device profile (same model, YouTube version, locale) in future runs. "
-        "Copy the recipe_step objects returned by tap_element / press_key / reveal_player_controls, in order, "
-        "leaving out detours that didn't contribute.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task": {"type": "string", "enum": list(RECIPE_TASKS)},
-                "steps": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "action": {
-                                "type": "string",
-                                "enum": ["tap", "switch_on", "press_key", "wait", "reveal_player_controls"],
-                                "description": "switch_on: make sure the on/off switch next to `match` is ON "
-                                "(safe to repeat; use it instead of tap for toggles).",
-                            },
-                            "match": {
-                                "type": "object",
-                                "properties": {
-                                    "resource_id": {"type": "string"},
-                                    "desc": {"type": "string"},
-                                    "text": {"type": "string"},
-                                },
-                            },
-                            "reveal_player_controls": {"type": "boolean"},
-                            "key": {"type": "string"},
-                            "seconds": {"type": "number"},
-                        },
-                        "required": ["action"],
-                    },
-                },
-                "notes": {"type": "string", "description": "What was different on this device (e.g. 'Hindi UI; menu item renamed')."},
-            },
-            "required": ["task", "steps"],
-        },
-    },
-    # --- diagnosis / recovery / finish -----------------------------------------
-    {
-        "name": "collect_logs",
-        "description": "Capture recent device logs (logcat) relevant to YouTube/Wi-Fi and save them for analysis.",
-        "parameters": {
-            "type": "object",
-            "properties": {"reason": {"type": "string", "description": "Why you are collecting logs right now."}},
-            "required": [],
-        },
-    },
-    {
-        "name": "retry_test",
-        "description": (
-            f"Re-run the core playback steps (stop, relaunch, open the URL, clear ads). Bounded to {MAX_RETRIES} retries "
-            f"total - check retries_remaining in prior results before calling again. Redo fullscreen/stats afterwards."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "reason": {"type": "string", "description": "Your diagnosis of what went wrong and why a retry is expected to help."}
-            },
-            "required": ["reason"],
-        },
-    },
-    {
-        "name": "generate_report",
-        "description": (
-            "Finish the test and produce the final report. This ALWAYS ends the run - call it exactly once, "
-            "after you have a verified PASS/FAIL, or once you conclude the issue needs a human."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "status": {"type": "string", "enum": ["PASS", "FAIL", "NEEDS_HUMAN"]},
-                "summary": {"type": "string", "description": "One or two sentence summary of the outcome."},
-                "root_cause": {"type": "string", "description": "If a failure occurred, your diagnosis of the root cause."},
-                "recovery_action": {
-                    "type": "string",
-                    "description": "What you did to recover or adapt (including any recipes you learned). Omit if nothing.",
-                },
-            },
-            "required": ["status", "summary"],
-        },
-    },
+    _schema("check_device", "Return whether this Android device is connected."),
+    _schema("get_device_info", "Return the phone, YouTube version, locale and screen size."),
+    _schema("get_wifi_status", "Return current Wi-Fi state; association does not prove internet access."),
+    _schema("toggle_wifi", "Enable or disable Wi-Fi.", {"enabled": {"type": "boolean"}}, ["enabled"]),
+    _schema("launch_youtube", "Restart YouTube on its home screen."),
+    _schema("open_video_url", "Open the configured test URL in YouTube."),
+    _schema("wait_for_ads", "Wait for or skip player ads."),
+    _schema("enable_stats_for_nerds", "Try recipes and built-in locators for the stats overlay."),
+    _schema("enable_stats_in_app_settings", "Try a saved recipe for YouTube's General stats setting."),
+    _schema("enter_fullscreen", "Try recipes and the built-in fullscreen locator."),
+    _schema("stop_video", "Press Back once."),
+    _schema("get_playback_status", "Monitor playback for a bounded duration.",
+            {"duration_seconds": {"type": "integer"}}, ["duration_seconds"]),
+    _schema("get_player_state", "Return player, fullscreen, stats, ad and media state."),
+    _schema("get_screen", "Return the current indexed UI elements and optional screenshot.",
+            {"include_screenshot": {"type": "boolean"}}),
+    _schema("reveal_player_controls", "Reveal auto-hiding player controls."),
+    _schema("tap_element", "Tap an element from the latest screen. Already-on switches and their rows are not tapped.",
+            {"index": {"type": "integer"}, "reveal_player_controls_first": {"type": "boolean"}}, ["index"]),
+    _schema("press_key", "Press a named Android key.",
+            {"key": {"type": "string", "enum": ["back", "home", "enter", "space", "media_play_pause", "escape"]}},
+            ["key"]),
+    _schema("swipe", "Swipe the current screen.",
+            {"direction": {"type": "string", "enum": ["up", "down", "left", "right"]}}, ["direction"]),
+    _schema("save_recipe", "Save only the minimal verified actions. Notes must state the cause and phone difference.",
+            {"task": {"type": "string", "enum": list(RECIPE_TASKS)}, "steps": {"type": "array", "items": {"type": "object"}},
+             "notes": {"type": "string"}}, ["task", "steps", "notes"]),
+    _schema("collect_logs", "Capture diagnostic logs.", {"reason": {"type": "string"}}),
+    _schema("step_done", "End this repair attempt with its verified result.",
+            {"fixed": {"type": "boolean"}, "summary": {"type": "string"},
+             "needs_human": {"type": "boolean"}}, ["fixed", "summary"]),
 ]
+_SCHEMAS_BY_NAME = {item["function"]["name"]: item for item in TOOL_SCHEMAS}
 
 
-TOOL_SCHEMAS = [{"type": "function", "function": schema} for schema in TOOL_SCHEMAS]
+KNOWN_CAUSES = {
+    "launch": "A connection/authorization problem or app-start failure can prevent YouTube reaching foreground.",
+    "open_url": "An app chooser, browser handoff, popup, or missing player can block the deep link.",
+    "ads": "Ad controls vary; a missing player is distinct from a visible ad.",
+    "stats": "If Stats for nerds is absent from More, its YouTube setting may be off: You → Settings → General.",
+    "fullscreen": "Player controls auto-hide and the fullscreen locator varies by YouTube version.",
+    "playback": "Playback may be paused, buffering, disconnected, or showing an in-player error.",
+}
 
 
-def build_system_prompt(*, device_id: str, duration_seconds: int, video_url: str, fullscreen: bool, stats_for_nerds: bool) -> str:
-    extras = [name for name, on in (("enable Stats for nerds", stats_for_nerds), ("enter full screen", fullscreen)) if on]
-    return f"""You are an AI test agent that controls a real Android phone to test YouTube playback, using a fixed set of \
-tools. You never write or request shell commands - only the predefined tools are available, and they always \
-operate on device {device_id}.
+def schemas_for(names) -> list[dict]:
+    return [_SCHEMAS_BY_NAME[name] for name in names if name in _SCHEMAS_BY_NAME]
 
-Test configuration (fixed - you cannot change it):
-- Video URL: {video_url}
-- Playback monitoring duration: {duration_seconds} seconds
-- Player setup required: {", ".join(extras) if extras else "none"}
 
-Your core job is to get this video playing correctly on THIS phone, whatever its manufacturer, Android version, \
-YouTube version or language. The built-in steps were written for one phone with an English UI; on other phones \
-they may fail. When they do, you adapt - you are the fallback, so a built-in failure is a problem to solve, not \
-a reason to give up.
-
-Flow:
-1. check_device, get_device_info (note manufacturer, YouTube version, locale), get_wifi_status.
-   Wi-Fi association is not internet availability: the phone may use mobile data. connected=null means unknown.
-   toggle_wifi only accepts an enable/disable command; it does not choose a network or prove connectivity.
-   Do not repeatedly enable already-enabled Wi-Fi. After one unsuccessful enable/check, inspect get_screen,
-   playback state and collect_logs; diagnose or report NEEDS_HUMAN if manual network selection is required.
-2. launch_youtube -> open_video_url -> wait_for_ads.
-3. Player setup: enable_stats_for_nerds (if required) BEFORE enter_fullscreen (if required) - the menu is easier \
-to reach in portrait.
-4. get_playback_status with duration_seconds={duration_seconds}.{" Monitoring only starts once Stats for nerds is visible - the tool refuses otherwise, so make sure step 3 succeeded (and redo it after any retry_test)." if stats_for_nerds else ""}
-5. generate_report exactly once.
-
-When a built-in step fails (or returns a hint), fix it yourself:
-a. get_screen to see what is actually on screen. Read labels in whatever language they are in; use the \
-screenshot, icons (gear, three dots, expand arrows) and positions to identify controls.
-b. Handle blockers first: popups, consent/permission dialogs, "open with" choosers, update prompts, \
-sign-in nags - dismiss them (tap the dismiss/skip/not-now option, or press_key back).
-   Stay inside YouTube: never tap ads ("Install", "Visit advertiser", "Learn more"), share targets, or \
-anything that opens another app. If a tap result carries a warning that another app opened (or you see an \
-app-lock/PIN screen, Play Store, browser, messaging app), press_key back immediately and never save that step.
-c. Do the step manually: reveal_player_controls / tap_element (reveal_player_controls_first=true for player \
-buttons) / swipe / press_key. Re-run get_screen after each change rather than assuming.
-d. Verify with get_player_state (fullscreen / stats_for_nerds_visible / media_state). Never claim success \
-without verification.
-e. save_recipe with the recipe_step objects of the steps that worked, so future runs on this device profile \
-are automatic. Only save verified, minimal steps.
-
-Common device-specific issues: the player settings button may be a gear or three dots and may be labelled in \
-another language; "Stats for nerds" may sit under an "Additional settings"/"More" submenu, or be missing from the \
-player menu until it is switched on in YouTube's settings (enable_stats_in_app_settings); some phones open the \
-URL in a browser or show an app chooser; ads may need waiting out; Xiaomi/Oppo/Vivo phones need "USB debugging \
-(Security settings)" enabled for taps to work - if taps have no effect at all, report NEEDS_HUMAN with that \
-instruction.
-
-Failures during playback: collect_logs, re-check relevant state (get_wifi_status, check_device) to diagnose - \
-verify causes with tools, don't assume. Take a safe recovery action if one exists (e.g. toggle_wifi), verify it, \
-then retry_test (max {MAX_RETRIES} retries; don't call it after retries_remaining is 0) and redo the player setup.
-
-Report honestly: PASS if the video played for the full duration (setup steps done, or clearly explained if one \
-was impossible on this device), FAIL if playback did not work, NEEDS_HUMAN if you cannot proceed safely. In \
-recovery_action, mention anything you adapted and any recipe you saved.
-
-You have a hard limit of {MAX_TOOL_CALLS} tool calls - be efficient: prefer element lists over screenshots \
-when the labels are readable, and don't re-check state without a reason. Keep your text brief; you are narrating \
-your reasoning live to a human watching the console."""
+def build_fix_prompt(step: str, target: str) -> str:
+    return f"""You repair one failed YouTube test step on one Android phone.
+Target step: {step}
+Target state: {target}
+Do not continue to a later test step. Only the tools available for this repair can be called.
+Take one action per turn. If screen_changed is false, that action did nothing; do not repeat it.
+Stay inside YouTube, dismiss blocking popups, and never tap ads or links into another app.
+Never tap a switch or its row when its current screen state is "on".
+launch_youtube restarts YouTube; open_video_url replaces the current screen with the configured video.
+Verify player targets with get_player_state. For an app-setting switch, verify get_screen shows switch "on".
+After a verified repair, save_recipe with notes stating the cause and what differed on this phone, then call step_done.
+If the safe fix requires a person, call step_done with fixed=false and needs_human=true.
+Known cause: {KNOWN_CAUSES.get(step, "The observed state differs from the target.")}"""
 
 
 def _tool_result_content(result: dict):
-    """Keep tool results text-only; images belong in a subsequent user message."""
     payload = dict(result)
     image_b64 = payload.pop("_image_jpeg_b64", None)
     if image_b64 and not NVIDIA_NIM_VISION:
-        payload["screenshot_note"] = (
-            "Screenshot omitted: NVIDIA_NIM_VISION is disabled. Use UI elements and device state."
-        )
+        payload["screenshot_note"] = "Screenshot omitted because NVIDIA_NIM_VISION is disabled."
     return json.dumps(payload, default=str, ensure_ascii=False), image_b64
 
 
-def run_agent_loop(*, goal: str, state, dispatch, on_assistant_text, on_tool_call, on_tool_result) -> str:
-    """Keep device dispatch and budgets local; send OpenAI-compatible history."""
+def _shrink_old_screens(messages: list[dict]) -> list[dict]:
+    """Only the newest tool result with elements keeps the full screen."""
+    copied = [dict(message) for message in messages]
+    newest_kept = False
+    for message in reversed(copied):
+        if message.get("role") != "tool" or not isinstance(message.get("content"), str):
+            continue
+        try:
+            result = json.loads(message["content"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(result, dict) or "elements" not in result:
+            continue
+        if not newest_kept:
+            newest_kept = True
+            continue
+        kept = {key: result[key] for key in ("success", "tapped", "recipe_step", "screen_changed", "error")
+                if key in result}
+        message["content"] = json.dumps(kept, ensure_ascii=False)
+    return copied
+
+
+def run_agent_loop(*, tools, system_prompt, starting_message, state, dispatch,
+                   on_assistant_text=lambda text: None, on_tool_call=lambda name, args: None,
+                   on_tool_result=lambda name, result: None, usage=None) -> str:
     with create_client() as client:
-        return _run_agent_loop(client, goal, state, dispatch, on_assistant_text, on_tool_call, on_tool_result)
+        return _run_agent_loop(client, tools, system_prompt, starting_message, state, dispatch,
+                               on_assistant_text, on_tool_call, on_tool_result, usage)
 
 
-def _run_agent_loop(client, goal, state, dispatch, on_assistant_text, on_tool_call, on_tool_result):
-    messages = [
-        {"role": "system", "content": build_system_prompt(
-            device_id=state.device_id, duration_seconds=state.duration_seconds,
-            video_url=state.video_url, fullscreen=state.fullscreen, stats_for_nerds=state.stats_for_nerds,
-        )},
-        {"role": "user", "content": f"Test goal: {goal}"},
-    ]
-    allowed_tools = {schema["function"]["name"] for schema in TOOL_SCHEMAS}
+def _run_agent_loop(client, tools, system_prompt, starting_message, state, dispatch,
+                    on_assistant_text, on_tool_call, on_tool_result, usage=None):
+    schemas = schemas_for(tools)
+    allowed = {schema["function"]["name"] for schema in schemas}
+    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": starting_message}]
     for _ in range(MAX_LLM_TURNS):
-        message, refused = chat_completion(client, messages, tools=TOOL_SCHEMAS, on_text=on_assistant_text)
+        request_messages = _shrink_old_screens(messages)
+        message, refused = chat_completion(
+            client, request_messages, tools=schemas, tool_choice="required",
+            on_text=on_assistant_text, usage=usage)
         if refused:
             return "refused"
         messages.append(message)
         calls = message.get("tool_calls", [])
         if not calls:
-            break
+            continue
 
         budget_exceeded, images = False, []
-        for call in calls:
+        for index, call in enumerate(calls):
             name = call["function"]["name"]
-            try:
-                arguments = json.loads(call["function"]["arguments"])
-                if not isinstance(arguments, dict):
-                    raise ValueError("Arguments must be a JSON object")
-                if name not in allowed_tools:
-                    raise ValueError("Unknown tool")
-                if state.finished or budget_exceeded:
-                    result = {"error": "Run has ended; this tool was not executed."}
-                else:
+            if index:
+                result = {"success": False, "error": "not executed: one action per turn"}
+            else:
+                try:
+                    arguments = json.loads(call["function"]["arguments"])
+                    if not isinstance(arguments, dict) or name not in allowed:
+                        raise ValueError
                     on_tool_call(name, arguments)
                     started = time.monotonic()
-                    record("agent_tool_started", tool=name, tool_call_id=call["id"])
                     result = dispatch(name, arguments)
-                    record("agent_tool_completed", tool=name, tool_call_id=call["id"],
+                    record("fix_tool_completed", tool=name, tool_call_id=call["id"],
                            duration_seconds=round(time.monotonic() - started, 3))
-            except ToolBudgetExceeded as exc:
-                result = {"error": str(exc)}
-                budget_exceeded = True
-            except (ValueError, TypeError):
-                result = {"error": "Invalid tool name or arguments. Use a defined tool and valid JSON object arguments."}
+                except ToolBudgetExceeded as exc:
+                    result = {"success": False, "error": str(exc)}
+                    budget_exceeded = True
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    result = {"success": False, "error": "Invalid tool name or arguments."}
             content, image_b64 = _tool_result_content(result)
             on_tool_result(name, {key: value for key, value in result.items() if key != "_image_jpeg_b64"})
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
             if image_b64 and NVIDIA_NIM_VISION:
                 images.extend([
-                    {"type": "text", "text": f"Screenshot from {name} (tool call {call['id']}):"},
+                    {"type": "text", "text": f"Current screen after {name}:"},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
                 ])
-        # All tool responses must precede supplemental screenshots.
         if images:
             messages.append({"role": "user", "content": images})
         if budget_exceeded:
             return "budget_exceeded"
-        if state.finished:
+        if state.fix_result is not None:
             return "finished"
-    return "finished" if state.finished else "turns_exhausted"
+    return "turns_exhausted"

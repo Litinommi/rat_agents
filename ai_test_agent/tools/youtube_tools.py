@@ -46,10 +46,7 @@ _MENU_OPEN_ATTEMPTS = 2  # the menu-button tap can land just as the controls fad
 
 
 def _get_driver(device_id: str):
-    driver = _SESSIONS.get(device_id)
-    if driver is None:
-        raise RuntimeError("No active session for this device - call launch_youtube first")
-    return driver
+    return _SESSIONS.get(device_id) or _connect(device_id)
 
 
 def _connect(device_id: str):
@@ -210,7 +207,7 @@ def wait_for_ads(device_id: str, timeout_seconds: int = 120) -> dict:
                    ui_hierarchy=driver.dump_hierarchy())
             return {"success": False, "error": f"{reason} after {timeout_seconds}s", "ads_skipped": skipped,
                     "player_present": player_present, "ad_evidence": evidence,
-                    "hint": "Inspect get_screen and player state; timeout alone does not prove an ad or a network outage."}
+                    "hint": "The player/ad state did not become stable; timeout alone does not prove a network outage."}
         return {"success": True, "ads_skipped": skipped}
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": str(exc)}
@@ -250,6 +247,7 @@ def get_player_state(device_id: str) -> dict:
             "ad_showing": _ad_showing(driver),
             "orientation": "LANDSCAPE" if width > height else "PORTRAIT",
             "activity": driver.app_current().get("activity"),
+            "package": driver.app_current().get("package"),
         }
         state["media_state"] = adb_tools.get_media_playback_state(device_id, YOUTUBE_PACKAGE)
         return state
@@ -305,14 +303,10 @@ def enable_stats_in_app_settings(device_id: str) -> dict:
 
 
 _SELF_HEAL_HINT = (
-    "Inspect the UI with get_screen, perform the step with tap_element/press_key, verify with "
-    "get_player_state, then save_recipe('{task}', steps) so this device works automatically next time."
+    "The built-in locator and saved recipes did not reach the '{task}' target state."
 )
 _STATS_SETTING_HINT = (
-    " If 'Stats for nerds' is missing from the player's More menu, it may first need turning on in YouTube's "
-    "settings (typically You -> Settings -> General -> 'Enable stats for nerds'): do that with get_screen/"
-    "tap_element (use a switch_on recipe step for the toggle), save_recipe('enable_stats_in_settings', steps), "
-    "then open_video_url, wait_for_ads and retry."
+    " 'Stats for nerds' can be absent from the player menu while YouTube's General setting is off."
 )
 
 
