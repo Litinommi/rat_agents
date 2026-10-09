@@ -52,6 +52,7 @@ class RunContext:
     fixes: list[dict]
     console: Callable[[str], None]
     fix_count: int = 0
+    suppress_recipe_log: bool = False
 
 
 def _log(device_id: str, message: str) -> None:
@@ -85,7 +86,8 @@ def _steps(ctx: RunContext) -> list[Step]:
         result = call("enable_stats_for_nerds", {})
         if _screen_ok(result):
             return result
-        ctx.console(f"...  stats unavailable ({result.get('error')}); checking the saved app-setting recipe")
+        if not ctx.suppress_recipe_log:
+            ctx.console(f"...  stats unavailable ({result.get('error')}); checking the saved app-setting recipe")
         setting = call("enable_stats_in_app_settings", {})
         if _screen_ok(setting):
             opened = call("open_video_url", {})
@@ -140,19 +142,29 @@ def fix_step(device_id: str, step: Step, failure: dict, done: list[str], ctx: Ru
         return {"fixed": False, "summary": f"fix limit ({MAX_FIXES_PER_DEVICE}) reached", "needs_human": False}
 
     with _group_lock(_profile_group(device_id, ctx.sim)):
-        rerun = step.run()
+        # First re-run: suppress verbose logging since we know it's likely to fail the same way
+        ctx.suppress_recipe_log = True
+        try:
+            rerun = step.run()
+        finally:
+            ctx.suppress_recipe_log = False
         if _screen_ok(rerun) and step.check():
             return {"fixed": True, "summary": "step passed when rechecked after waiting for a similar phone",
                     "needs_human": False, "ai_called": False}
         _dismiss_popups(device_id, ctx.sim)
-        rerun = step.run()
+        # Second re-run: also suppress verbose logging
+        ctx.suppress_recipe_log = True
+        try:
+            rerun = step.run()
+        finally:
+            ctx.suppress_recipe_log = False
         if _screen_ok(rerun) and step.check():
             return {"fixed": True, "summary": "saved popup recipe cleared the step",
                     "needs_human": False, "ai_called": False}
 
         ctx.fix_count += 1
         ctx.state.fix_result = None
-        allowed = _COMMON_FIX_TOOLS | step.tools
+        allowed = _COMMON_FIX_TOOLS | step.tools | {"web_search"}
         dispatch = build_tool_registry(ctx.state, ctx.sim, allowed=allowed, budget=FIX_MAX_TOOL_CALLS)
         screen = dispatch("get_screen", {"include_screenshot": False})
         recipes = [] if ctx.sim else ui_tools.recipe_context(device_id, {

@@ -425,7 +425,16 @@ def tap_element(device_id: str, index: int, reveal_player_controls_first: bool =
     if not screen:
         return {"success": False, "error": "Call get_screen first"}
     if not 0 <= index < len(screen):
-        return {"success": False, "error": f"No element #{index} on the last screen (0..{len(screen) - 1})"}
+        # Provide helpful context about what's on screen
+        element_summary = []
+        for i, elem in enumerate(screen[:10]):  # Show first 10 elements
+            desc = elem.get('desc') or elem.get('text') or f"[{elem.get('class', 'unknown')}]"
+            if desc:
+                element_summary.append(f"{i}: {desc}")
+        elements_info = "; ".join(element_summary)
+        if len(screen) > 10:
+            elements_info += f" (and {len(screen) - 10} more)"
+        return {"success": False, "error": f"No element #{index} on the last screen (0..{len(screen) - 1}). Visible elements: {elements_info}"}
 
     element = screen[index]
     match = _stable_match(element, screen)
@@ -467,7 +476,8 @@ def tap_element(device_id: str, index: int, reveal_player_controls_first: bool =
                 yt._reveal_and_find(driver, selector)
             found = _find_match(driver, match)
             if found is None or not yt._tap(found):
-                return {"success": False, "error": f"Element {match} not found after revealing player controls"}
+                # Provide context about what we were looking for
+                return {"success": False, "error": f"Element {match} not found after revealing player controls. Looking for: {match}"}
         else:
             x1, y1, x2, y2 = _parse_bounds(element["bounds"])
             driver.click((x1 + x2) // 2, (y1 + y2) // 2)
@@ -496,7 +506,7 @@ def press_key(device_id: str, key: str) -> dict:
         time.sleep(1)
         return {"success": True, "recipe_step": {"action": "press_key", "key": key}}
     except Exception as exc:  # noqa: BLE001
-        return {"success": False, "error": str(exc)}
+        return {"success": False, "error": f"Failed to press key '{key}': {str(exc)}"}
 
 
 def swipe(device_id: str, direction: str) -> dict:

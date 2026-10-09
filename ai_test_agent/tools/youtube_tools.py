@@ -362,11 +362,22 @@ def enable_stats_for_nerds(device_id: str) -> dict:
 
         overlays = driver(**_PLAYER_OVERLAYS)
         if not overlays.exists:
-            return {"success": False, "error": "Player not found on screen", "hint": hint}
+            # Provide context about what we do see
+            player_state = get_player_state(device_id)
+            return {"success": False, "error": "Player not found on screen",
+                   "hint": hint, "context": f"Player state: {player_state}"}
         player = _bounds(overlays)
         for _ in range(_MENU_OPEN_ATTEMPTS):
             if not _open_player_menu(driver, player):
-                return {"success": False, "error": "Could not locate the player settings button", "hint": hint}
+                # Provide context about overlays we can see
+                overlay_elements = []
+                try:
+                    # Try to get some basic overlay info for context
+                    overlay_elements.append("player_overlays_present")
+                except:
+                    pass
+                return {"success": False, "error": "Could not locate the player settings button",
+                       "hint": hint, "context": f"Visible overlays: {overlay_elements}"}
             if driver(**_MENU_MORE).wait(timeout=2):
                 break  # menu is open
         # (if it still didn't open, the "More" lookup below reports it)
@@ -378,14 +389,29 @@ def enable_stats_for_nerds(device_id: str) -> dict:
             items = driver(**selector)
             if not items.exists or not _tap(items[items.count - 1]):
                 driver.press("back")  # close the half-open menu so playback isn't obscured
-                return {"success": False, "error": f"Could not find '{step}' in the player menu", "hint": hint}
+                # Provide context about what menu items we can see
+                visible_menu_items = []
+                try:
+                    # Check for common menu items
+                    if driver(**_MENU_MORE).exists:
+                        visible_menu_items.append("More")
+                    if driver(**{"description": "Settings"}).exists:
+                        visible_menu_items.append("Settings")
+                except:
+                    pass
+                return {"success": False, "error": f"Could not find '{step}' in the player menu",
+                       "hint": hint, "context": f"Visible menu items: {visible_menu_items}"}
             if _current_package(driver) != YOUTUBE_PACKAGE:
                 driver.press("back")
-                return {"success": False, "error": f"Tapping '{step}' opened another app; pressed back", "hint": hint}
+                return {"success": False, "error": f"Tapping '{step}' opened another app; pressed back",
+                       "hint": hint, "context": f"Current package: {_current_package(driver)}"}
 
         time.sleep(1.5)
         if not driver(**_NERD_STATS).exists:
-            return {"success": False, "error": "Stats for nerds overlay did not appear", "hint": hint}
+            # Provide context about what we do see in the player area
+            player_state = get_player_state(device_id)
+            return {"success": False, "error": "Stats for nerds overlay did not appear",
+                   "hint": hint, "context": f"Player state: {player_state}"}
         return {"success": True, "via": "built_in"}
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": str(exc), "hint": hint}
