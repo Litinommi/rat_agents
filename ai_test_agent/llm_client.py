@@ -3,11 +3,14 @@
 import json
 import time
 
-from config import MAX_LLM_TURNS, NVIDIA_NIM_VISION
+from config import LLM_VISION, MAX_LLM_TURNS
 from diagnostics import record
 from nim_client import chat_completion, create_client
 from test_runner import ToolBudgetExceeded
 from tools.ui_tools import RECIPE_TASKS
+
+# Compatibility alias; its value comes from the generic LLM setting.
+NVIDIA_NIM_VISION = LLM_VISION
 
 _NO_INPUT = {"type": "object", "properties": {}, "required": []}
 
@@ -49,8 +52,6 @@ TOOL_SCHEMAS = [
     _schema("step_done", "End this repair attempt with its verified result.",
             {"fixed": {"type": "boolean"}, "summary": {"type": "string"},
              "needs_human": {"type": "boolean"}}, ["fixed", "summary"]),
-    _schema("web_search", "Search the web for current information about YouTube UI, ADB commands, or troubleshooting. Use when uncertain about current procedures or needing up-to-date guidance.",
-            {"query": {"type": "string", "description": "The search query"}}, ["query"]),
 ]
 _SCHEMAS_BY_NAME = {item["function"]["name"]: item for item in TOOL_SCHEMAS}
 
@@ -80,19 +81,6 @@ Never tap a switch or its row when its current screen state is "on".
 launch_youtube restarts YouTube; open_video_url replaces the current screen with the configured video.
 Verify player targets with get_player_state. For an app-setting switch, verify get_screen shows switch "on".
 
-When uncertain about current YouTube UI or procedures:
-1. Use the web_search tool to find up-to-date guidance
-2. Effective search queries examples:
-   - "YouTube Settings General location Samsung Galaxy A52"
-   - "enable stats for nerds missing YouTube menu"
-   - "UIAutomator2 YouTube resource ID stats for nerds"
-   - "ADB shell commands YouTube playback status"
-3. Focus on these domains for reliable information:
-   - support.google.com (official YouTube/Android help)
-   - xda-developers.com (device-specific Android discussions)
-   - stackoverflow.com (technical ADB/UIAutomator questions)
-4. Apply the information found to adjust your approach
-
 If the built-in tools (enable_stats_for_nerds, enable_stats_in_app_settings) fail:
 1. Manually navigate to fix the issue (e.g., for stats: YouTube -> Settings -> General -> enable "Stats for nerds")
 2. Verify the fix worked using get_player_state or the relevant verification method
@@ -111,7 +99,7 @@ def _tool_result_content(result: dict):
     payload = dict(result)
     image_b64 = payload.pop("_image_jpeg_b64", None)
     if image_b64 and not NVIDIA_NIM_VISION:
-        payload["screenshot_note"] = "Screenshot omitted because NVIDIA_NIM_VISION is disabled."
+        payload["screenshot_note"] = "Screenshot omitted because LLM_VISION is disabled."
     return json.dumps(payload, default=str, ensure_ascii=False), image_b64
 
 

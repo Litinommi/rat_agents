@@ -9,7 +9,9 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 
-from config import LOG_DIR, NVIDIA_NIM_API_KEY
+from config import LLM_API_KEY, LOG_DIR
+
+NVIDIA_NIM_API_KEY = LLM_API_KEY
 
 _active = ContextVar("run_diagnostics", default=None)
 _SENSITIVE = re.compile(r"api.?key|authorization|token|secret|password|cookie|_image_jpeg_b64", re.I)
@@ -22,7 +24,8 @@ def sanitize(value):
     if isinstance(value, (list, tuple)):
         return [sanitize(v) for v in value]
     if isinstance(value, str):
-        secrets = {NVIDIA_NIM_API_KEY} | {v for k, v in os.environ.items() if _SENSITIVE.search(k) and len(v) >= 8}
+        secrets = {LLM_API_KEY, NVIDIA_NIM_API_KEY} | {
+            v for k, v in os.environ.items() if _SENSITIVE.search(k) and len(v) >= 8}
         for secret in sorted((v for v in secrets if v), key=len, reverse=True):
             value = value.replace(secret, "[REDACTED]")
         value = re.sub(r"(?i)Bearer\s+\S+", "Bearer [REDACTED]", value)

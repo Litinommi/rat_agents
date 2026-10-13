@@ -164,7 +164,7 @@ def fix_step(device_id: str, step: Step, failure: dict, done: list[str], ctx: Ru
 
         ctx.fix_count += 1
         ctx.state.fix_result = None
-        allowed = _COMMON_FIX_TOOLS | step.tools | {"web_search"}
+        allowed = _COMMON_FIX_TOOLS | step.tools
         dispatch = build_tool_registry(ctx.state, ctx.sim, allowed=allowed, budget=FIX_MAX_TOOL_CALLS)
         screen = dispatch("get_screen", {"include_screenshot": False})
         recipes = [] if ctx.sim else ui_tools.recipe_context(device_id, {

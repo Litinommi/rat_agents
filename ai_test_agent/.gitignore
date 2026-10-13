@@ -6,3 +6,9 @@ logs/*.log
 reports/*.json
 
 logs/*.jsonl
+youtube/browser_recipes.json
+youtube/browser_recipes.tmp
+youtube/browser_stage_recipes.json
+youtube/browser_stage_recipes.tmp
+youtube/youtube_test.log
+*:Zone.Identifier

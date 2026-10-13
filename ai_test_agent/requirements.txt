@@ -1,4 +1,4 @@
-# OpenAI-compatible client library; inference uses NVIDIA NIM exclusively.
+# OpenAI-compatible client library; supports local Ollama and NVIDIA NIM.
 openai>=1.68.0,<3
 # Imported directly for transport error handling and offline protocol tests.
 httpx>=0.23.0,<1
@@ -7,3 +7,5 @@ httpx>=0.23.0,<1
 python-dotenv>=1.0.1
 uiautomator2>=3.7.0
 pillow>=10.0.0
+selenium>=4.17.0,<5
+requests>=2.31.0,<3

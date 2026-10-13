@@ -1,4 +1,4 @@
-"""Offline NVIDIA transport and step-repair protocol tests."""
+"""Offline OpenAI-compatible transport and step-repair protocol tests."""
 
 import json
 import sys
@@ -46,13 +46,13 @@ class NIMTests(unittest.TestCase):
         self.addCleanup(client.close)
         return client
 
-    def test_client_is_nvidia_only_and_configuration_is_required(self):
+    def test_client_uses_configured_provider_and_configuration_is_required(self):
         with patch.object(nim_client, "NVIDIA_NIM_API_KEY", "test-secret"), \
              patch.object(nim_client, "nim_configuration_error", return_value=None), \
              nim_client.create_client() as client:
-            self.assertEqual(str(client.base_url), "https://integrate.api.nvidia.com/v1/")
-        with patch.object(config, "NVIDIA_NIM_API_KEY", ""):
-            self.assertIn("NVIDIA_NIM_API_KEY", config.nim_configuration_error())
+            self.assertEqual(str(client.base_url), config.LLM_BASE_URL + "/")
+        with patch.object(config, "LLM_API_KEY", ""):
+            self.assertIn("LLM_API_KEY", config.llm_configuration_error())
 
     def test_chat_request_uses_sampling_required_tools_usage_and_reasoning(self):
         captured = {}

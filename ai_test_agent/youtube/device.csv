@@ -1,0 +1,6 @@
+DeviceList,PingPacketLoss %,L3_TCP_UL Mbps,L3_TCP_DL Mbps,L3_TCP_BiDi Mbps,L3_UDP_UL Mbps,L3_UDP_DL Mbps,L3_UDP_BiDi Mbps,Videostreaming URLcount,RealBrowser URLcount,HTTP URLcount,FTP URLcount,PortReset No_of_connections,Roaming No_of_Successful Roams
+33264c48,,,,,,,,,,,,,
+la’s,,,,,,,,,,,,,
+macoss-MacBook-Air,,,,,,,,,,,,,
+ubuntu24,,,,,,,,,,,,,
+win-int-ax201-168,,,,,,,,,,,,,

@@ -2,10 +2,12 @@
 
 This runner tests YouTube playback on one or more Android phones. Built-in
 uiautomator2 steps do the normal work. When `--ai-fallback` is enabled, only a
-failed step is handed to NVIDIA NIM; a successful repair is saved as a recipe
+failed step is handed to an OpenAI-compatible LLM; a successful repair is saved as a recipe
 for later phones and runs.
 
-Inference uses NVIDIA's OpenAI-compatible endpoint. There is no arbitrary shell
+The default `.env.example` targets the local Ollama server at
+`http://192.168.200.182:11434/v1`. NVIDIA NIM remains supported through either
+the new `LLM_*` settings or the legacy `NVIDIA_NIM_*` settings. There is no arbitrary shell
 tool and the model cannot select another device, URL, or later test step.
 
 ## Setup
@@ -15,7 +17,7 @@ Requirements:
 - Python 3.10+
 - Android Platform Tools and an ADB-authorized phone for real runs
 - YouTube installed on the phone
-- A NVIDIA API key and tool-calling model for AI repair
+- An OpenAI-compatible endpoint and a model that supports tool calling
 
 From this directory:
 
@@ -26,14 +28,14 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set `NVIDIA_NIM_API_KEY` and `NVIDIA_NIM_MODEL` in `.env`. Environment
-variables override that file. Keep `.env` private.
+Set `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` in `.env`. Environment
+variables override that file. For an unauthenticated local Ollama server,
+`LLM_API_KEY=ollama` satisfies the OpenAI SDK without adding remote authentication.
+Keep `.env` private.
 
-The defaults match the NVIDIA catalog settings for
-`nvidia/nemotron-3-ultra-550b-a55b`: temperature `1.0`, top-p `0.95`, and its
-maximum output of `32768` tokens. Lower `NVIDIA_NIM_MAX_TOKENS` when using a
-model with a smaller limit. Screenshots are sent only when
-`NVIDIA_NIM_VISION=true` and the selected model supports vision plus tools.
+The local defaults select `qwen3.8:latest`, non-streaming output, and an 8192-token
+output ceiling. Screenshots are sent only when `LLM_VISION=true` and the selected
+model supports both images and tools.
 
 ## Running
 
@@ -161,11 +163,13 @@ They cover NIM transport safety, the constrained repair loop, switch state and
 guards, one-action turns, history compaction, recipe failures, tool filtering,
 group serialization, and deterministic resume behavior.
 
-Live NIM transport checks:
+Live provider and tool-calling checks:
 
 ```bash
-python validate_nim.py
+python validate_llm.py
 ```
+
+`validate_nim.py` remains as a compatibility alias.
 
 The full simulated repair command is:
 
@@ -177,13 +181,50 @@ On a real phone, turn off YouTube's **Enable stats for nerds** setting and run
 the same command without `--simulate`. The next run should use the saved recipe
 without an AI call.
 
+## Laptop browser self-healing
+
+`youtube/youtube.py` can optionally repair failed Selenium locators and browser
+stages with the configured local model. Important stages (load, Stats for Nerds,
+loop, resolution, playback, and fullscreen) have independent target-state
+verification. Locator changes are committed only after the enclosing stage passes.
+When locator repair is insufficient, a bounded agent can click, right-click,
+hover, or press an allowlisted key, checking the target after every action.
+
+Verified locators are stored in `youtube/browser_recipes.json`; verified action
+sequences are stored in `youtube/browser_stage_recipes.json`. Stage recipes are
+replayed before another model call, and either recipe type is skipped after two
+consecutive failures.
+
+Enable browser repair by adding `--ai-fallback` to the laptop command:
+
+```bash
+python youtube/youtube.py --host SERVER --device_name LAPTOP --ai-fallback
+```
+
+For a repeatable repair test, inject a broken locator without editing the normal
+test logic. Semantic keys are the lowercase underscore form of the logged element
+name:
+
+```bash
+python youtube/youtube.py \
+  --host SERVER \
+  --device_name LAPTOP \
+  --ai-fallback \
+  --inject-locator-failure 'youtube_settings_button=.intentionally-broken'
+```
+
+The first run should log an AI repair and save a recipe. Repeating the command
+should log that the saved browser recipe repaired the element without another
+model call. The model only selects from a bounded list of visible DOM elements;
+it cannot execute shell commands or arbitrary JavaScript.
+
 ## Project layout
 
 ```text
 agent.py              compatibility shim
 play_youtube.py       per-phone step runner and repair orchestration
 llm_client.py         repair prompt, schemas, and one-action model loop
-nim_client.py         NVIDIA transport, streaming, usage logging
+nim_client.py         OpenAI-compatible transport, streaming, usage logging
 test_runner.py        shared state and filtered/budgeted registry
 tools/youtube_tools.py
 tools/ui_tools.py     screen actions and recipe store
