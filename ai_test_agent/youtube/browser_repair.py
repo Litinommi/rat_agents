@@ -23,8 +23,9 @@ from nim_client import LLMError, chat_completion, create_client  # noqa: E402
 logger = logging.getLogger(__name__)
 RECIPE_PATH = Path(__file__).resolve().with_name("browser_recipes.json")
 STAGE_RECIPE_PATH = Path(__file__).resolve().with_name("browser_stage_recipes.json")
-MAX_CANDIDATES = 80
+MAX_CANDIDATES = 180
 MAX_STAGE_REPAIR_TURNS = 3
+MAX_MODEL_CANDIDATES = 24
 # Tool-capable reasoning models may use part of the completion budget for
 # internal reasoning before emitting the required tool call.  A 512-token
 # budget was too small for stage repair with a full DOM candidate list.
@@ -39,11 +40,12 @@ class BrowserRepairAgent:
     """Repair only failed element lookup calls on the current WebDriver session."""
 
     def __init__(self, driver, faults=None, recipe_path=RECIPE_PATH,
-                 stage_recipe_path=STAGE_RECIPE_PATH):
+                 stage_recipe_path=STAGE_RECIPE_PATH, force_ai=False):
         self.driver = driver
         self.faults = faults or {}
         self.recipe_path = Path(recipe_path)
         self.stage_recipe_path = Path(stage_recipe_path)
+        self.force_ai = force_ai
         self.pending_locator_repairs = []
 
     def locator_for_run(self, locator, element_name):
@@ -56,7 +58,7 @@ class BrowserRepairAgent:
 
     def repair(self, original_locator, element_name, clickable=False):
         key = semantic_key(element_name)
-        recipe = self._recipe(key)
+        recipe = None if self.force_ai else self._recipe(key)
         if recipe:
             element = self._locate(recipe["by"], recipe["value"], clickable, timeout=4)
             if element is not None:
@@ -70,7 +72,8 @@ class BrowserRepairAgent:
             logger.error("AI repair found no visible DOM candidates for %s.", element_name)
             return None
 
-        selected = self._deterministic_candidate(element_name, candidates)
+        selected = None if self.force_ai else self._deterministic_candidate(
+            element_name, candidates)
         if selected is not None:
             logger.info("Deterministic semantic repair matched DOM candidate %s for %s.",
                         selected[0], element_name)
@@ -123,7 +126,6 @@ class BrowserRepairAgent:
         actions = []
         history = []
         for turn in range(MAX_STAGE_REPAIR_TURNS):
-            self._prepare_target(target)
             candidates = self._rank_candidates(target, self._visible_elements())
             if not candidates:
                 logger.error("Stage repair found no DOM candidates for %s.", stage)
@@ -136,8 +138,27 @@ class BrowserRepairAgent:
             if decision["action"] == "cannot_repair":
                 logger.error("AI could not repair stage %s: %s", stage, decision.get("reason", ""))
                 return False
-            result, saved_action = self._execute_stage_decision(decision, candidates)
-            history.append({"decision": decision, "result": result})
+            logger.info("Stage %s decision: action=%s candidate=%s reason=%s",
+                        stage, decision.get("action"), decision.get("index"),
+                        decision.get("reason", ""))
+            requested = decision
+            decision, candidates = self._refresh_stage_decision(decision, target, candidates)
+            if decision is None:
+                result, saved_action = ({"success": False,
+                                         "error": "selected candidate disappeared after refresh"}, None)
+                selected = None
+            else:
+                selected = (candidates[decision["index"]]
+                            if isinstance(decision.get("index"), int) else None)
+                before = self._state_fingerprint(candidates)
+                result, saved_action = self._execute_stage_decision(decision, candidates)
+                if result.get("success"):
+                    time.sleep(0.3)
+                    after = self._rank_candidates(target, self._visible_elements())
+                    result["screen_changed"] = before != self._state_fingerprint(after)
+            history.append({"decision": requested, "selected": self._candidate_summary(selected),
+                            "result": result})
+            logger.info("Stage %s action result: %s", stage, result)
             if not result.get("success"):
                 continue
             if saved_action:
@@ -151,6 +172,8 @@ class BrowserRepairAgent:
 
     def try_saved_stage_recipe(self, stage, verify):
         """Return None when absent, otherwise whether the verified replay passed."""
+        if self.force_ai:
+            return None
         recipe = self._stage_recipe(stage)
         if recipe is None:
             return None
@@ -237,7 +260,8 @@ class BrowserRepairAgent:
 
     def _prepare_target(self, element_name):
         """Restore transient YouTube controls after a potentially slow model call."""
-        if not any(word in element_name.lower() for word in ("full-screen", "fullscreen", "play button")):
+        if not any(word in element_name.lower() for word in
+                   ("full-screen", "fullscreen", "play button")):
             return
         try:
             player = self.driver.find_element(By.CSS_SELECTOR, ".html5-video-container")
@@ -246,8 +270,51 @@ class BrowserRepairAgent:
             logger.warning("Could not reveal player controls before verifying %s.", element_name)
 
     @staticmethod
+    def _candidate_identity(candidate):
+        """Fields stable enough to find a model choice in a fresh DOM snapshot."""
+        return tuple(candidate.get(key, "") for key in
+                     ("selector", "text", "aria_label", "title", "role"))
+
+    @staticmethod
+    def _candidate_summary(candidate):
+        if not isinstance(candidate, dict):
+            return None
+        return {key: candidate.get(key) for key in
+                ("selector", "text", "aria_label", "title", "role", "classes")
+                if candidate.get(key)}
+
+    @classmethod
+    def _state_fingerprint(cls, candidates):
+        return sorted({cls._candidate_identity(candidate) for candidate in candidates})
+
+    def _refresh_stage_decision(self, decision, target, old_candidates):
+        """Remap a model-selected element after refreshing transient browser state."""
+        if decision.get("action") == "press_key":
+            return decision, old_candidates
+        index = decision.get("index")
+        if not isinstance(index, int) or not 0 <= index < len(old_candidates):
+            return None, []
+        selected = old_candidates[index]
+        refreshed = self._rank_candidates(target, self._visible_elements())
+        identity = self._candidate_identity(selected)
+        for fresh_index, candidate in enumerate(refreshed):
+            if self._candidate_identity(candidate) == identity:
+                return {**decision, "index": fresh_index}, refreshed
+        # Selectors are generally the strongest identity and can survive text
+        # changes such as elapsed playback time.
+        selector = selected.get("selector")
+        if selector:
+            for fresh_index, candidate in enumerate(refreshed):
+                if candidate.get("selector") == selector:
+                    return {**decision, "index": fresh_index}, refreshed
+        logger.warning("Stage candidate disappeared before action: selector=%s text=%s",
+                       selector, selected.get("text", ""))
+        return None, refreshed
+
+    @staticmethod
     def _rank_candidates(element_name, candidates):
-        ignored = {"youtube", "button", "clickable", "current", "the", "for", "controls"}
+        ignored = {"youtube", "button", "clickable", "current", "the", "for", "controls",
+                   "menu", "item", "option", "panel", "video", "stage"}
         target = re.sub(r"[^a-z0-9]+", " ", element_name.lower())
         tokens = [token for token in target.split() if len(token) > 2 and token not in ignored]
 
@@ -258,14 +325,31 @@ class BrowserRepairAgent:
                 candidate.get("role", ""), " ".join(candidate.get("classes", [])),
                 candidate.get("selector", ""),
             ])
-            haystack = re.sub(r"[^a-z0-9]+", " ", values.lower())
+            # Compare whole normalized words. Substring matching caused "auto"
+            # in a resolution target to rank "Autoplay" as the sole candidate.
+            haystack = set(re.sub(r"[^a-z0-9]+", " ", values.lower()).split())
             matches = sum(1 for token in tokens if token in haystack)
             return (matches, int(candidate.get("clickable", False)),
                     int(bool(candidate.get("aria_label"))), int(bool(candidate.get("title"))))
 
         ranked = sorted(candidates, key=score, reverse=True)
         relevant = [candidate for candidate in ranked if score(candidate)[0] > 0]
-        selected = (relevant[:30] if relevant else ranked[:30])
+        actionable = [candidate for candidate in ranked if candidate.get("clickable")]
+        surfaces = sorted(
+            (candidate for candidate in candidates
+             if candidate.get("interaction_surface") and not candidate.get("clickable")),
+            key=lambda candidate: candidate.get("area", 0), reverse=True)
+        selected = []
+        selected_ids = set()
+        for group, limit in ((relevant, 10), (actionable, 10), (surfaces, 4), (ranked, 24)):
+            for candidate in group[:limit]:
+                if id(candidate) not in selected_ids:
+                    selected.append(candidate)
+                    selected_ids.add(id(candidate))
+                if len(selected) >= MAX_MODEL_CANDIDATES:
+                    break
+            if len(selected) >= MAX_MODEL_CANDIDATES:
+                break
         return [{**candidate, "index": index} for index, candidate in enumerate(selected)]
 
     def _locate(self, by, value, clickable, timeout):
@@ -316,24 +400,39 @@ return [...document.querySelectorAll('body *')]
     const s = getComputedStyle(el);
     return r.width > 1 && r.height > 1 && s.visibility !== 'hidden' && s.display !== 'none';
   })
-  .map(el => ({
-    tag: el.tagName.toLowerCase(),
-    text: (el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 120),
-    aria_label: el.getAttribute('aria-label') || '',
-    title: el.getAttribute('title') || '',
-    role: el.getAttribute('role') || '',
-    classes: [...el.classList].slice(0, 8),
-    selector: selectorFor(el),
-    clickable: !!(el.matches('button,a,input,[role="button"],[role="menuitem"]') ||
-                  getComputedStyle(el).cursor === 'pointer')
-  }))
+  .map(el => {
+    const r = el.getBoundingClientRect();
+    const clickable = !!(el.matches('button,a,input,[role="button"],[role="menuitem"]') ||
+                         getComputedStyle(el).cursor === 'pointer');
+    const tag = el.tagName.toLowerCase();
+    const parent = el.parentElement;
+    return {
+      tag,
+      text: (el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 120),
+      aria_label: el.getAttribute('aria-label') || '',
+      title: el.getAttribute('title') || '',
+      role: el.getAttribute('role') || '',
+      classes: [...el.classList].slice(0, 8),
+      parent_text: parent ? (parent.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 80) : '',
+      parent_classes: parent ? [...parent.classList].slice(0, 5) : [],
+      selector: selectorFor(el),
+      clickable,
+      x: Math.round(r.x), y: Math.round(r.y),
+      width: Math.round(r.width), height: Math.round(r.height),
+      area: Math.round(r.width * r.height),
+      interaction_surface: !clickable && ['div', 'video', 'canvas'].includes(tag) &&
+                           r.width >= 240 && r.height >= 120
+    };
+  })
   .filter(item => item.clickable || item.aria_label || item.title || item.role ||
                   item.classes.some(c => c.startsWith('ytp-')) ||
+                  item.interaction_surface ||
                   (item.text && item.text.length <= 240))
   .sort((a, b) => {
     const score = item => (item.clickable ? 100 : 0) + (item.aria_label ? 80 : 0) +
       (item.title ? 40 : 0) + (item.role ? 30 : 0) +
-      (item.classes.some(c => c.startsWith('ytp-')) ? 60 : 0);
+      (item.classes.some(c => c.startsWith('ytp-')) ? 60 : 0) +
+      (item.interaction_surface ? Math.min(50, item.area / 20000) : 0);
     return score(b) - score(a);
   })
   .slice(0, arguments[0])
@@ -436,9 +535,13 @@ return [...document.querySelectorAll('body *')]
         }
         system = (
             "Repair exactly one failed YouTube browser stage. Take one safe action from the supplied "
-            "tools. Use candidate indexes only from the current DOM snapshot. Stay on YouTube, never "
-            "click ads or external links, and do not repeat an action that failed. The runner verifies "
-            "the target state after every successful action and will provide a fresh DOM next turn."
+            "tools using only evidence in the current DOM. Candidates include controls, menu items, "
+            "and large interaction surfaces which may support hover or context-click. If the target is "
+            "not visible, choose one plausible reversible navigation action, explain its evidence, and "
+            "do not claim unseen menu contents as fact. Use candidate indexes only from the "
+            "current snapshot. Stay on YouTube, never click ads or external links, and do not repeat an "
+            "action whose result says screen_changed=false. The runner verifies the target state after "
+            "every action and provides the observed element and result on the next turn."
         )
         try:
             with create_client() as client:

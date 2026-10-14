@@ -93,7 +93,8 @@ def upload_test_log(host, device_name):
 class YouTube(object):
 
     def __init__(self, url, resolution, host, port, duration, device_name, driver,
-                 ai_fallback=False, locator_faults=None):
+                 ai_fallback=False, locator_faults=None, local_run=False,
+                 force_ai_repair=False):
         self.url = url
         self.resolution = resolution
         self.device_name = device_name
@@ -108,8 +109,11 @@ class YouTube(object):
         self.server_connection_failed = False
         self.stop_check_failed = False
         self.last_progress_log = None
+        self.local_run = local_run
         self.browser_repair = (
-            BrowserRepairAgent(driver, faults=locator_faults) if ai_fallback else None
+            BrowserRepairAgent(
+                driver, faults=locator_faults, force_ai=force_ai_repair
+            ) if ai_fallback else None
         )
 
     def wait_for_element(
@@ -187,6 +191,8 @@ class YouTube(object):
 
     def check_stop_signal(self):
         """Check the stop signal from the Flask server."""
+        if self.local_run:
+            return self.stop_signal
         try:
             endpoint_url = f"http://{self.host}:5002/check_stop"
 
@@ -583,6 +589,8 @@ class YouTube(object):
         logger.info("Browser driver closed successfully.")
 
     def send_stats_to_api(self, stats, device_name, stop=False):
+        if self.local_run:
+            return
         try:
             url = f"http://{self.host}:5002/youtube_stats"
             headers = {
@@ -679,8 +687,30 @@ Example:
         help=("Replace a semantic locator for a repeatable healing test. Example: "
               "youtube_settings_button=.intentionally-broken"),
     )
+    parser.add_argument(
+        "--keep-browser-open",
+        action="store_true",
+        help="Keep the visible Chrome window open after the test for debugging.",
+    )
+    parser.add_argument(
+        "--local-run",
+        action="store_true",
+        help=("Run without the Flask test server: keep statistics and logs local, "
+              "and skip stop-signal, statistics-upload, and log-upload requests."),
+    )
+    parser.add_argument(
+        "--force-ai-repair",
+        action="store_true",
+        help=("Demo only: bypass saved repair recipes and deterministic semantic "
+              "matching so failed repairs are sent directly to the configured LLM."),
+    )
 
-    parser.add_argument("--host", type=str, required=True)
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Test-server host (default: 127.0.0.1; unused with --local-run).",
+    )
     parser.add_argument("--port", type=str, default=8000)
     parser.add_argument("--device_name", type=str, required=True)
 
@@ -692,6 +722,8 @@ Example:
         parser.error(str(exc))
     if locator_faults and not args.ai_fallback:
         parser.error("--inject-locator-failure requires --ai-fallback")
+    if args.force_ai_repair and not args.ai_fallback:
+        parser.error("--force-ai-repair requires --ai-fallback")
 
     logger.info("Test started: device=%s.", args.device_name)
     logger.info("Operating system: %s.", platform.system())
@@ -714,9 +746,20 @@ Example:
     # options.add_argument("--memory-pressure-thresholds-mb=2048")
     # options.add_experimental_option("detach", True)
     options.add_argument("--no-sandbox")
+    # This runner is intentionally interactive: keep Chrome on the user's
+    # desktop instead of relying on Chrome's default window placement.
+    options.add_argument("--start-maximized")
+    options.add_argument("--window-position=0,0")
+    if platform.system() == "Linux" and os.environ.get("DISPLAY"):
+        # Chrome for Testing can create an unopenable taskbar entry when it
+        # guesses Wayland from a mixed Wayland/X11 desktop. Selenium is given
+        # DISPLAY by the launcher, so use X11 consistently for a visible window.
+        options.add_argument("--ozone-platform=x11")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
+    if args.keep_browser_open:
+        options.add_experimental_option("detach", True)
 
     if platform.system() == "Windows":
         adguard_path = os.path.join(
@@ -746,6 +789,10 @@ Example:
         driver = webdriver.Chrome(
             service=service, options=options
         )  # Or choose the appropriate webdriver for your browser
+        driver.set_window_rect(x=0, y=0, width=1280, height=900)
+        driver.maximize_window()
+        logger.info("Chrome window opened in visible mode on DISPLAY=%s.",
+                    os.environ.get("DISPLAY", "not set"))
 
         yt = YouTube(
             args.url,
@@ -757,7 +804,19 @@ Example:
             driver,
             ai_fallback=args.ai_fallback,
             locator_faults=locator_faults,
+            local_run=args.local_run,
+            force_ai_repair=args.force_ai_repair,
         )
+        if args.force_ai_repair:
+            logger.warning(
+                "Force-AI repair demo mode enabled; saved and deterministic repairs "
+                "are bypassed."
+            )
+        if args.local_run:
+            logger.info(
+                "Local-run mode enabled; server stop checks, statistics uploads, "
+                "and log upload are disabled."
+            )
         if args.duration != 0:
             yt.duration = args.duration
         if yt.play():
@@ -770,7 +829,7 @@ Example:
         logger.error("YouTube test failed while %s.", failed_stage)
         record_debug_error(f"YouTube test failed while {failed_stage}")
     finally:
-        if result == "FAILED" and driver is not None:
+        if result == "FAILED" and driver is not None and not args.keep_browser_open:
             logger.info("Stopping YouTube playback and closing Chrome.")
             try:
                 driver.quit()
@@ -780,6 +839,8 @@ Example:
                     "Chrome could not be closed completely. Manual cleanup may be required."
                 )
                 record_debug_error("Chrome cleanup failed")
+        elif driver is not None and args.keep_browser_open:
+            logger.info("Leaving Chrome open for interactive debugging.")
         logger.info("TEST RESULT: %s", result)
         if yt is not None:
             logger.info(
@@ -787,10 +848,13 @@ Example:
                 len(yt.dataset),
                 yt.stats_upload_failures,
             )
-        upload_test_log(
-            args.host,
-            args.device_name,
-        )
+        if args.local_run:
+            logger.info("Client log retained locally at %s.", LOG_FILE_PATH)
+        else:
+            upload_test_log(
+                args.host,
+                args.device_name,
+            )
 
     return 0 if result != "FAILED" else 1
 
