@@ -1,0 +1,13 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+youtube/youtube_test.log
+youtube/browser_recipes.json
+youtube/browser_recipes.tmp
+youtube/browser_stage_recipes.json
+youtube/browser_stage_recipes.tmp
+youtube/stats_for_nerds_*.xml
+*:Zone.Identifier
+youtube/youtube_android_test.pid
+youtube/android_youtube_console.log

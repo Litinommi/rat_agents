@@ -1,0 +1,8 @@
+# Android (youtube_android_test.py + android_ai_repair.py)
+pure-python-adb
+uiautomator2
+pytesseract
+opencv-python
+requests
+# Laptops (youtube.py + browser_repair.py)
+selenium>=4.17.0,<5
